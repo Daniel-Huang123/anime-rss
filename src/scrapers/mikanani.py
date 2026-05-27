@@ -286,34 +286,15 @@ def has_recent_resources(
     use_mirror: bool = False,
 ) -> bool:
     """
-    通过解析 RSS XML 检查字幕组在最近 weeks 周内是否有更新。
-    RSS 无需登录即可访问。
+    检查字幕组是否有资源：RSS 中有任意条目即认为有效。
+    （原日期窗口检查已移除：对当季新番无意义，且是主要性能瓶颈。
+      qBittorrent 自动规则会持续监控，资源活跃与否不影响订阅正确性。）
     """
     base = MIKAN_MIRROR if use_mirror else MIKAN_BASE
     rss_url = build_rss_url(bangumi_id, subgroup_id, base)
-
     try:
         feed = feedparser.parse(rss_url)
-        if not feed.entries:
-            return False
-
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(weeks=weeks)
-        has_any_date = False
-        for entry in feed.entries:
-            pub = entry.get("published_parsed")
-            if pub:
-                has_any_date = True
-                pub_dt = datetime(*pub[:6], tzinfo=timezone.utc)
-                if pub_dt >= cutoff:
-                    return True
-
-        # 所有条目都有日期但没有一条在时间窗口内 → 无近期资源
-        if has_any_date:
-            return False
-
-        # 没有任何日期信息（feedparser 解析不到时间），有 entries 就保守认为有资源
         return len(feed.entries) > 0
-
     except Exception as e:
         logger.warning("检查 RSS 资源失败 [%d/%d]: %s", bangumi_id, subgroup_id, e)
         return False
@@ -449,6 +430,45 @@ def _title_variants(title: str) -> list[str]:
     return variants
 
 
+# ── bgm.tv 搜索回退 ───────────────────────────────────────
+
+import requests as _requests
+
+
+def _bgm_canonical_names(title: str) -> list[str]:
+    """
+    用 bangumi.tv v0 API 搜索标题，返回官方名称列表（name_cn 优先，再 name）。
+    用于 mikanani 标题与 yuc.wiki 标题不一致时的最后兜底。
+    bgm 的搜索对别名、异体字容错极强，通常能找到准确匹配。
+    """
+    try:
+        resp = _requests.post(
+            "https://api.bgm.tv/v0/search/subjects",
+            params={"limit": 5},
+            json={"keyword": title, "filter": {"type": [2]}},
+            headers={
+                "User-Agent": "anime-rss/1.0",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=6,
+        )
+        if not resp.ok:
+            return []
+        names: list[str] = []
+        for item in resp.json().get("data", [])[:3]:
+            cn = (item.get("name_cn") or "").strip()
+            jp = (item.get("name") or "").strip()
+            if cn and cn not in names:
+                names.append(cn)
+            if jp and jp not in names:
+                names.append(jp)
+        return names
+    except Exception as e:
+        logger.debug("bgm 搜索失败 [%s]: %s", title, e)
+        return []
+
+
 # ── 辅助：获取某字幕组 RSS 最新一条的发布时间 ────────────
 
 
@@ -519,6 +539,20 @@ def resolve_anime_rss(
             logger.info("搜索词 '%s' 命中 %d 个候选 (fallback=%s)", term, len(candidates), is_fallback)
             break
         logger.info("搜索词 '%s' 无结果，尝试下一变体", term)
+
+    if not candidates and not search_override:
+        # ── bgm.tv 回退：用官方名称重新搜索 ─────────────────
+        logger.info("本地变体均无结果，尝试 bgm.tv 搜索：%s", title)
+        bgm_names = _bgm_canonical_names(title)
+        for bgm_name in bgm_names:
+            if bgm_name in search_terms:
+                continue          # 已经试过
+            candidates = search_bangumi(bgm_name, use_mirror)
+            if candidates:
+                is_fallback = True
+                logger.info("bgm 名称 '%s' 命中 %d 个候选", bgm_name, len(candidates))
+                break
+            logger.info("bgm 名称 '%s' 仍无结果", bgm_name)
 
     if not candidates:
         logger.warning("未在蜜柑计划找到：%s（尝试词：%s）", title, search_terms)

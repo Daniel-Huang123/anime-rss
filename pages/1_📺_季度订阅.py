@@ -54,6 +54,7 @@ priorities = cfg.get("subtitle_priorities", ["ANi", "kirara"])
 weeks      = cfg.get("resource_check", {}).get("recent_weeks", 4)
 use_mirror = cfg.get("advanced", {}).get("use_mirror", False)
 qbt_cfg    = cfg["qbittorrent"]
+qbt_save_path = qbt_cfg.get("save_path", "").strip().strip('"').strip("'")
 qbt = QBTClient(
     host=qbt_cfg["host"], port=qbt_cfg["port"],
     username=qbt_cfg["username"], password=qbt_cfg["password"],
@@ -273,9 +274,14 @@ for day in ordered_days:
                     if result is None:
                         st.error("仍然未找到", icon="❌")
                     else:
+                        _dl_path = (
+                            f"{qbt_save_path}/{loaded_quarter}/{title}"
+                            if qbt_save_path else ""
+                        )
                         ok, qbt_msg = qbt.add_rss_feed(
                             url=result["rss_url"],
                             path=f"{loaded_quarter}/{title}",
+                            save_path=_dl_path,
                         )
                         if ok:
                             get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
@@ -306,9 +312,14 @@ for day in ordered_days:
                         st.session_state[retry_key] = title
                         st.rerun()
                     else:
+                        _dl_path = (
+                            f"{qbt_save_path}/{loaded_quarter}/{title}"
+                            if qbt_save_path else ""
+                        )
                         ok, qbt_msg = qbt.add_rss_feed(
                             url=result["rss_url"],
                             path=f"{loaded_quarter}/{title}",
+                            save_path=_dl_path,
                         )
                         if ok:
                             get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)

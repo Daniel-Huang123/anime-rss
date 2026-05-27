@@ -59,19 +59,46 @@ class QBTClient:
 
     # ── RSS Feed ───────────────────────────────────────────
 
-    def add_rss_feed(self, url: str, path: str) -> tuple[bool, str]:
+    def add_rss_feed(
+        self,
+        url: str,
+        path: str,
+        save_path: str = "",
+    ) -> tuple[bool, str]:
         """
-        添加 RSS 订阅。
-        path 格式：'2026Q1/进击的巨人'（自动在 qBittorrent 里创建文件夹层级）
+        添加 RSS 订阅并同步创建自动下载规则。
+
+        path 格式：'2026Q1/进击的巨人'
+        save_path：种子保存目录（如 'D:/Anime/2026Q1/进击的巨人'）；
+                   为空时 qBittorrent 使用默认保存路径。
         返回 (成功, 消息)。
         """
         try:
             with self._client() as c:
-                c.rss.add_feed(url=url, item_path=path)
-            logger.info("RSS 已添加：%s → %s", path, url)
+                # 1. 添加 RSS feed
+                try:
+                    c.rss.add_feed(url=url, item_path=path)
+                except qbittorrentapi.Conflict409Error:
+                    pass   # feed 已存在，继续确保规则存在
+
+                # 2. 创建/更新自动下载规则（规则名与 path 相同）
+                rule_def: dict = {
+                    "enabled": True,
+                    "mustContain": "",
+                    "mustNotContain": "",
+                    "useRegex": False,
+                    "episodeFilter": "",
+                    "smartFilter": False,
+                    "addPaused": False,
+                    "assignedCategory": "",
+                    "affectedFeeds": [url],
+                }
+                if save_path:
+                    rule_def["savePath"] = save_path
+                c.rss.set_rule(rule_name=path, rule_def=rule_def)
+
+            logger.info("RSS+规则 已添加：%s → %s  savePath=%s", path, url, save_path)
             return True, f"✓ 已添加 RSS：{path}"
-        except qbittorrentapi.Conflict409Error:
-            return False, f"RSS 已存在（跳过）：{path}"
         except Exception as e:
             logger.error("添加 RSS 失败 [%s]: %s", path, e)
             return False, f"添加失败：{e}"
