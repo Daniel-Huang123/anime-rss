@@ -98,7 +98,24 @@ def _parse_page(page) -> list[dict]:
 
 
 def _parse_html_raw(html_content: str) -> list[dict]:
-    """用 re + 简单解析从原始 HTML 提取番剧信息。"""
+    """用 HTMLParser 从原始 HTML 提取番剧信息（含封面 data-src）。
+
+    yuc.wiki 的每部番剧 HTML 结构：
+      <div style="float:left">
+        <div class="div_date">
+          <p class="imgtext2">完结</p>
+          <p class="imgep">(全12话)</p>
+          <img width="120px" data-src="https://xxx.jpg">  ← 封面
+        </div>
+        <table width="120px">
+          <tr><td class="date_title">番剧标题</td></tr>
+          <tr class="tr_area"><td><a href="...">Bilibili</a></td></tr>
+        </table>
+      </div>
+
+    关键点：img 在 date_title 之前，所以用 pending_cover 暂存，
+    遇到 date_title 时把 pending_cover 关联到本条目。
+    """
     from html.parser import HTMLParser
 
     results: list[dict] = []
@@ -108,34 +125,49 @@ def _parse_html_raw(html_content: str) -> list[dict]:
         def __init__(self):
             super().__init__()
             self.current_day = "未知"
+
+            # 状态标志
             self._in_date2 = False
             self._in_date_title = False
             self._in_imgep = False
             self._in_imgtext2 = False
             self._in_tr_area = False
             self._in_platform_link = False
+            self._in_div_date = False   # <div class="div_date"> 内部
+
+            # 当前番剧临时数据
             self._current_title = ""
             self._current_ep = ""
             self._current_status = "连载中"
             self._current_platforms: list[str] = []
-            self._pending_entry: dict | None = None
-            self._td_class = ""
-            self._tr_class = ""
+            self._pending_cover: str = ""   # div_date 里的 data-src 暂存
 
         def handle_starttag(self, tag, attrs):
             attr_dict = dict(attrs)
             cls = attr_dict.get("class", "")
 
-            if tag == "td" and "date2" in cls:
+            if tag == "div" and "div_date" in cls:
+                self._in_div_date = True
+
+            elif tag == "img" and self._in_div_date:
+                # 封面图（懒加载用 data-src）
+                src = attr_dict.get("data-src") or attr_dict.get("src", "")
+                if src and ("jpg" in src or "png" in src or "webp" in src or "jpeg" in src):
+                    self._pending_cover = src
+
+            elif tag == "td" and "date2" in cls:
                 self._in_date2 = True
+
             elif tag == "td" and "date_title" in cls:
-                # 新番剧开始：先保存上一条
+                # 新番剧开始 → flush 上一条，重置状态
                 self._flush()
                 self._in_date_title = True
                 self._current_title = ""
                 self._current_ep = ""
                 self._current_status = "连载中"
                 self._current_platforms = []
+                # pending_cover 不重置，它属于紧接着的这个 date_title
+
             elif tag == "p" and "imgep" in cls:
                 self._in_imgep = True
             elif tag == "p" and "imgtext2" in cls:
@@ -146,7 +178,9 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 self._in_platform_link = True
 
         def handle_endtag(self, tag):
-            if tag == "td":
+            if tag == "div":
+                self._in_div_date = False
+            elif tag == "td":
                 self._in_date2 = False
                 self._in_date_title = False
             elif tag == "p":
@@ -162,7 +196,6 @@ def _parse_html_raw(html_content: str) -> list[dict]:
             if not text:
                 return
             if self._in_date2:
-                # "周一 (月) [Monday]" → 取"周X"
                 m = re.match(r"(周[一二三四五六日])", text)
                 if m:
                     self.current_day = m.group(1)
@@ -186,7 +219,10 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                     "day": self.current_day,
                     "status": self._current_status,
                     "platforms": list(self._current_platforms),
+                    "cover_url": self._pending_cover or None,
                 })
+            # 封面用完就清，避免串到下一条
+            self._pending_cover = ""
 
         def close(self):
             self._flush()
@@ -213,6 +249,7 @@ def _parse_with_css(page) -> list[dict]:
                 "day": "未知",
                 "status": "连载中",
                 "platforms": [],
+                "cover_url": None,
             })
     return results
 

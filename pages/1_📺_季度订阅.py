@@ -9,6 +9,7 @@ from src.qbt.client import QBTClient
 from src.scrapers.mikanani import resolve_anime_rss
 from src.scrapers.yuc_wiki import clear_cache, get_season_list
 from src.utils.config import load_config
+from src.utils.cover_cache import get_or_fetch_cover
 from src.utils.season import list_season_options, quarter_to_ym
 from src.utils.state import add_subscription, is_subscribed
 
@@ -51,18 +52,21 @@ if refresh_btn:
     clear_cache()
     st.session_state.pop("anime_list", None)
 
-if load_btn or "anime_list" not in st.session_state:
-    if load_btn or "anime_list" not in st.session_state:
-        year, month = quarter_to_ym(selected_quarter)
-        with st.spinner(f"正在爬取 yuc.wiki/{year:04d}{month:02d} ..."):
-            try:
-                anime_list = get_season_list(year, month)
-                st.session_state["anime_list"] = anime_list
-                st.session_state["loaded_quarter"] = selected_quarter
+if load_btn:
+    st.session_state.pop("anime_list", None)
+
+if "anime_list" not in st.session_state:
+    year, month = quarter_to_ym(selected_quarter)
+    with st.spinner(f"正在爬取 yuc.wiki/{year:04d}{month:02d} ..."):
+        try:
+            anime_list = get_season_list(year, month)
+            st.session_state["anime_list"] = anime_list
+            st.session_state["loaded_quarter"] = selected_quarter
+            if anime_list:
                 st.success(f"✓ 加载成功，共 {len(anime_list)} 部番剧")
-            except Exception as e:
-                st.error(f"加载失败：{e}")
-                st.stop()
+        except Exception as e:
+            st.error(f"加载失败：{e}")
+            st.stop()
 
 anime_list = st.session_state.get("anime_list", [])
 loaded_quarter = st.session_state.get("loaded_quarter", selected_quarter)
@@ -71,15 +75,29 @@ if not anime_list:
     st.info("点击「从 yuc.wiki 加载番单」开始")
     st.stop()
 
+# ── 封面网格预览（折叠） ──────────────────────────────────
+with st.expander(f"🖼️ 番剧封面预览（{len(anime_list)} 部）", expanded=False):
+    cover_cols = st.columns(8)
+    for idx, anime in enumerate(anime_list[:40]):  # 最多展示40个
+        with cover_cols[idx % 8]:
+            cover_url = anime.get("cover_url")
+            if cover_url:
+                try:
+                    st.image(cover_url, width=80, caption=anime["title"][:6])
+                except Exception:
+                    st.caption(anime["title"][:8])
+            else:
+                st.caption(f"🎬 {anime['title'][:6]}")
+
 # ── 番单表格（可勾选）────────────────────────────────────
 st.subheader(f"📋 {loaded_quarter} 番剧列表（{len(anime_list)} 部）")
 
-# 构造 DataFrame，加一列「已订阅」状态
+# 构造 DataFrame
 df_data = []
 for a in anime_list:
     subscribed = is_subscribed(loaded_quarter, a["title"])
     df_data.append({
-        "订阅": not subscribed,      # 默认勾选未订阅的
+        "订阅": not subscribed,
         "番剧": a["title"],
         "集数": a["episodes"],
         "播出日": a["day"],
@@ -102,7 +120,6 @@ if search_kw:
 if hide_subscribed:
     df = df[df["已订阅"] != "✓"]
 
-# 可编辑表格（让用户勾选）
 edited_df = st.data_editor(
     df,
     column_config={
@@ -121,18 +138,21 @@ edited_df = st.data_editor(
 )
 
 selected = edited_df[edited_df["订阅"] == True]["番剧"].tolist()
-already = edited_df[edited_df["已订阅"] == "✓"]["番剧"].tolist()
+already = [a["title"] for a in anime_list if is_subscribed(loaded_quarter, a["title"])]
 
 col_s1, col_s2, col_s3 = st.columns([2, 2, 1])
 with col_s1:
     st.caption(f"已勾选 **{len(selected)}** 部待订阅")
 with col_s2:
-    st.caption(f"已订阅 **{len(already)}** 部（已隐藏）" if hide_subscribed else f"已订阅 **{len(already)}** 部")
+    st.caption(f"已订阅 **{len(already)}** 部")
 with col_s3:
     start_btn = st.button("🚀 开始订阅", type="primary", disabled=not selected, use_container_width=True)
 
 # ── 批量订阅 ──────────────────────────────────────────────
 if start_btn and selected:
+    # 建立 title → cover_url 的映射（来自 yuc.wiki）
+    cover_map = {a["title"]: a.get("cover_url") for a in anime_list}
+
     st.divider()
     st.subheader("⏳ 订阅进度")
 
@@ -145,6 +165,8 @@ if start_btn and selected:
         with status_container:
             st.write(f"**[{i+1}/{total}]** 正在处理：{title} ...")
 
+        yuc_cover_url = cover_map.get(title)
+
         # 1. 在蜜柑计划搜索
         result = resolve_anime_rss(title, priorities, weeks, use_mirror)
 
@@ -152,14 +174,22 @@ if start_btn and selected:
             msg = f"❌ **{title}** — 蜜柑计划未找到合适资源"
             results_log.append(("error", msg))
         else:
-            # 2. 添加 RSS 到 qBittorrent
+            # 2. 下载封面（优先用 yuc.wiki，备选 mikanani）
+            cover_url_to_save = yuc_cover_url
+            cover_path = get_or_fetch_cover(
+                title=title,
+                bangumi_id=result["bangumi_id"],
+                cover_url=yuc_cover_url,
+            )
+
+            # 3. 添加 RSS 到 qBittorrent
             ok, qbt_msg = qbt.add_rss_feed(
                 url=result["rss_url"],
                 path=f"{loaded_quarter}/{title}",
             )
 
             if ok:
-                # 3. 保存到 state.json
+                # 4. 保存到 state.json（含封面 URL）
                 add_subscription(
                     quarter=loaded_quarter,
                     title=title,
@@ -167,8 +197,10 @@ if start_btn and selected:
                     subgroup_id=result["subgroup_id"],
                     subgroup_name=result["subgroup_name"],
                     rss_url=result["rss_url"],
+                    cover_url=cover_url_to_save,
                 )
-                msg = f"✅ **{title}** — 字幕组：{result['subgroup_name']}"
+                cover_hint = "🖼️" if cover_path else ""
+                msg = f"✅ **{title}** — 字幕组：{result['subgroup_name']} {cover_hint}"
                 results_log.append(("success", msg))
             else:
                 msg = f"⚠️ **{title}** — RSS 已找到但添加 qBit 失败：{qbt_msg}"
@@ -177,12 +209,11 @@ if start_btn and selected:
         progress.progress((i + 1) / total)
         time.sleep(delay)
 
-    # 显示汇总结果
+    # 汇总结果
     st.divider()
     success = sum(1 for t, _ in results_log if t == "success")
-    error = sum(1 for t, _ in results_log if t == "error")
+    error   = sum(1 for t, _ in results_log if t == "error")
     warning = sum(1 for t, _ in results_log if t == "warning")
-
     st.success(f"完成！成功 {success} 部 | 失败 {error} 部 | 警告 {warning} 部")
 
     for typ, msg in results_log:
@@ -193,5 +224,4 @@ if start_btn and selected:
         else:
             st.warning(msg)
 
-    # 清除缓存，下次重新加载显示已订阅状态
     st.session_state.pop("anime_list", None)
