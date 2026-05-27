@@ -72,7 +72,7 @@ def _get_session():
     if _session is None:
         logger.info("启动 StealthyFetcher 浏览器会话（首次较慢，约 10-20 秒）…")
         from scrapling.fetchers import StealthyFetcher
-        _session = StealthyFetcher(auto_match=False)
+        _session = StealthyFetcher()
     return _session
 
 
