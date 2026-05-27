@@ -110,7 +110,8 @@ def _parse_html_raw(html_content: str) -> list[dict]:
             # 状态标志
             self._in_date2 = False
             self._in_date_title = False
-            self._title_done = False      # <br> 后停止捕获标题
+            self._title_done = False      # 遇到集数型 <br> 后停止捕获标题
+            self._title_br_pending = False  # 遇到 <br> 暂存，等下一段文字判断
             self._in_imgep = False
             self._in_imgtext4 = False     # 播出时间段，如 "21:00~"
             self._in_imgtext2 = False     # 状态（完结等）
@@ -162,9 +163,9 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 self._pending_cover = ""
                 self._pending_broadcast_time = ""
 
-            elif tag == "br" and self._in_date_title:
-                # date_title_ 内 <br> 后是起始话数，不属于标题
-                self._title_done = True
+            elif tag == "br" and self._in_date_title and not self._title_done:
+                # 暂不立即截断：等下一个文字片段判断是"集数"还是标题续行
+                self._title_br_pending = True
 
             elif tag == "p" and "imgep" in cls:
                 self._in_imgep = True
@@ -184,6 +185,7 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 self._in_date2 = False
                 self._in_date_title = False
                 self._title_done = False
+                self._title_br_pending = False
             elif tag == "p":
                 self._in_imgep = False
                 self._in_imgtext4 = False
@@ -202,6 +204,19 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 if m:
                     self.current_day = m.group(1)
             elif self._in_date_title and not self._title_done:
+                if self._title_br_pending:
+                    self._title_br_pending = False
+                    # 判断 <br> 后的内容是否是集数标记（如"第5话"）
+                    # 是 → 截断标题；否 → 视为标题续行（拼接，不加空格）
+                    _EP_PATTERN = re.compile(
+                        r"^第[一二三四五六七八九十百\d]+[话集季期]"
+                        r"|^\d+话"
+                        r"|^EP\d+",
+                        re.IGNORECASE,
+                    )
+                    if _EP_PATTERN.match(text):
+                        self._title_done = True
+                        return  # 不把集数文字加入标题
                 self._current_title += text
             elif self._in_imgep:
                 self._current_ep = text

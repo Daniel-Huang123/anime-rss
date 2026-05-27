@@ -230,21 +230,81 @@ for day in ordered_days:
             if episodes:
                 st.caption(f"📺 {episodes}")
 
-            # 订阅按钮 / 已订阅标记
+            # 订阅按钮 / 已订阅标记 / 搜索失败重试
+            fail_key   = f"fail_{gidx}"
+            retry_key  = f"retry_term_{gidx}"
+
             if is_sub:
                 st.markdown(
                     '<p style="color:#00c853;font-size:0.85em;text-align:center;'
                     'margin:4px 0;font-weight:700;">✓ 已订阅</p>',
                     unsafe_allow_html=True,
                 )
+
+            elif st.session_state.get(fail_key):
+                # ── 失败重试区 ──────────────────────────────
+                st.markdown(
+                    '<p style="color:#ff4b4b;font-size:0.75em;text-align:center;'
+                    'margin:2px 0;">❌ 未找到</p>',
+                    unsafe_allow_html=True,
+                )
+                custom_term = st.text_input(
+                    "搜索词", key=f"ct_{gidx}",
+                    value=st.session_state.get(retry_key, title),
+                    label_visibility="collapsed",
+                    placeholder="修改蜜柑搜索词",
+                )
+                c_retry, c_cancel = st.columns(2)
+                with c_retry:
+                    do_retry = st.button("重试", key=f"rb_{gidx}",
+                                        use_container_width=True, type="primary")
+                with c_cancel:
+                    if st.button("取消", key=f"rc_{gidx}", use_container_width=True):
+                        st.session_state.pop(fail_key, None)
+                        st.rerun()
+
+                if do_retry:
+                    st.session_state[retry_key] = custom_term
+                    with st.spinner("重试中..."):
+                        result = resolve_anime_rss(
+                            title, priorities, weeks, use_mirror,
+                            search_override=custom_term,
+                        )
+                    if result is None:
+                        st.error("仍然未找到", icon="❌")
+                    else:
+                        ok, qbt_msg = qbt.add_rss_feed(
+                            url=result["rss_url"],
+                            path=f"{loaded_quarter}/{title}",
+                        )
+                        if ok:
+                            get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
+                            add_subscription(
+                                quarter=loaded_quarter, title=title,
+                                bangumi_id=result["bangumi_id"],
+                                subgroup_id=result["subgroup_id"],
+                                subgroup_name=result["subgroup_name"],
+                                rss_url=result["rss_url"],
+                                cover_url=cover_url or None,
+                            )
+                            subbed_titles.add(title)
+                            st.session_state.pop(fail_key, None)
+                            st.rerun()
+                        else:
+                            st.warning(qbt_msg)
+
             else:
+                # ── 正常订阅按钮 ────────────────────────────
                 if st.button("＋ 订阅", key=f"sub_{gidx}",
                              use_container_width=True, type="primary"):
                     with st.spinner(f"订阅 {title[:12]}..."):
                         result = resolve_anime_rss(title, priorities, weeks, use_mirror)
 
                     if result is None:
-                        st.error("蜜柑计划未找到合适资源", icon="❌")
+                        # 记录失败，显示重试 UI
+                        st.session_state[fail_key]  = True
+                        st.session_state[retry_key] = title
+                        st.rerun()
                     else:
                         ok, qbt_msg = qbt.add_rss_feed(
                             url=result["rss_url"],

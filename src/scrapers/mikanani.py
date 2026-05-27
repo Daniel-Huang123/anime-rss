@@ -375,6 +375,53 @@ def find_best_rss(
     return None
 
 
+# ── 搜索词变体生成 ───────────────────────────────────────
+
+import re as _re
+
+
+def _title_variants(title: str) -> list[str]:
+    """
+    为标题生成搜索变体列表，按优先级排列。
+
+    常见导致搜索失败的原因：
+      - yuc.wiki 使用中文标题，蜜柑使用略有差异的中文或日文名
+      - 标题带有"第3季/第4期"后缀，蜜柑可能只有干净的名字
+
+    策略（依次尝试）：
+      1. 原标题
+      2. 去末尾季数标记（第X季/第X期/Season N）
+      3. 第一个空格/冒号/中点前的部分（适用于"XX XX第2期"之类）
+      4. 标题前6字（最后兜底）
+    """
+    variants: list[str] = [title]
+
+    # 去末尾季数
+    no_season = _re.sub(
+        r"\s*(第[一二三四五六七八九十百\d]+[季期]|Season\s*\d+|S\d+)\s*$",
+        "", title,
+    ).strip()
+    if no_season and no_season != title:
+        variants.append(no_season)
+
+    # 第一个分隔符前的短标题
+    for sep in (" ", "：", ":", "·", "・", "～", "~"):
+        idx = title.find(sep)
+        if idx >= 3:  # 前缀至少3字有意义
+            part = title[:idx].strip()
+            if part not in variants:
+                variants.append(part)
+            break
+
+    # 前6字兜底（仅当标题较长时）
+    if len(title) > 8:
+        short = title[:6]
+        if short not in variants:
+            variants.append(short)
+
+    return variants
+
+
 # ── 完整流程（搜索 + 选择最佳 RSS）──────────────────────
 
 
@@ -383,9 +430,13 @@ def resolve_anime_rss(
     priorities: list[str],
     weeks: int = 4,
     use_mirror: bool = False,
+    search_override: str | None = None,
 ) -> dict | None:
     """
     一步完成：搜索番剧 → 找最佳 RSS。
+
+    search_override：用于手动指定蜜柑搜索词（跳过自动变体逻辑）。
+
     返回：
     {
       "title": str,
@@ -397,14 +448,27 @@ def resolve_anime_rss(
     }
     或 None（未找到）。
     """
-    candidates = search_bangumi(title, use_mirror)
+    # 确定要尝试的搜索词列表
+    if search_override:
+        search_terms = [search_override.strip()]
+    else:
+        search_terms = _title_variants(title)
+
+    # 逐个变体搜索，找到候选即停
+    candidates: list[dict] = []
+    for term in search_terms:
+        candidates = search_bangumi(term, use_mirror)
+        if candidates:
+            logger.info("搜索词 '%s' 命中 %d 个候选", term, len(candidates))
+            break
+        logger.info("搜索词 '%s' 无结果，尝试下一变体", term)
+
     if not candidates:
-        logger.warning("未在蜜柑计划找到：%s", title)
+        logger.warning("未在蜜柑计划找到：%s（尝试词：%s）", title, search_terms)
         return None
 
-    # 取第一个最匹配的候选（搜索结果按相关度排序）
-    # 如果第一个没有资源，尝试下一个
-    for candidate in candidates[:3]:  # 最多尝试前3个候选
+    # 取前3个候选，选第一个有资源的
+    for candidate in candidates[:3]:
         best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
         if best:
             return {
@@ -413,7 +477,6 @@ def resolve_anime_rss(
                 "bangumi_name": candidate["name"],
                 **best,
             }
-        # 候选间稍作间隔，避免请求过快
         time.sleep(0.5)
 
     logger.warning("'%s' 的所有候选番剧均无合适资源", title)
