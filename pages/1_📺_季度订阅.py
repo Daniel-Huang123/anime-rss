@@ -3,6 +3,7 @@
 import time
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from src.qbt.client import QBTClient
@@ -75,6 +76,28 @@ if not anime_list:
     st.info("点击「从 yuc.wiki 加载番单」开始")
     st.stop()
 
+@st.cache_data(show_spinner=False)
+def _fetch_cover_bytes(url: str) -> bytes | None:
+    """后端下载封面（Bilibili CDN 需要正确 Referer，不能让浏览器直接请求）。"""
+    if not url:
+        return None
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.bilibili.com/" if "hdslb.com" in url or "bilibili" in url else "https://yuc.wiki/",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.ok and len(r.content) > 500:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
 # ── 封面网格预览（折叠） ──────────────────────────────────
 with st.expander(f"🖼️ 番剧封面预览（{len(anime_list)} 部）", expanded=False):
     cover_cols = st.columns(8)
@@ -82,9 +105,10 @@ with st.expander(f"🖼️ 番剧封面预览（{len(anime_list)} 部）", expan
         with cover_cols[idx % 8]:
             cover_url = anime.get("cover_url")
             if cover_url:
-                try:
-                    st.image(cover_url, width=80, caption=anime["title"][:6])
-                except Exception:
+                img_bytes = _fetch_cover_bytes(cover_url)
+                if img_bytes:
+                    st.image(img_bytes, width=80, caption=anime["title"][:6])
+                else:
                     st.caption(anime["title"][:8])
             else:
                 st.caption(f"🎬 {anime['title'][:6]}")

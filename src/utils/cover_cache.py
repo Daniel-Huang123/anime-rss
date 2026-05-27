@@ -131,8 +131,11 @@ def fetch_cover_from_url(url: str, title: str, bangumi_id: int | None = None) ->
     if save_path.exists():
         return save_path
 
-    # yuc.wiki 图片 referer
-    headers = {**HEADERS, "Referer": "https://yuc.wiki/"}
+    # Bilibili CDN 需要 bilibili.com 作为 Referer（yuc.wiki 会被 403）
+    if "hdslb.com" in url or "bilibili" in url:
+        headers = {**HEADERS, "Referer": "https://www.bilibili.com/"}
+    else:
+        headers = {**HEADERS, "Referer": "https://yuc.wiki/"}
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
