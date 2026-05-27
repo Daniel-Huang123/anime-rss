@@ -61,26 +61,14 @@ def _cache_set(key: str, value: list) -> None:
     _save_cache(data)
 
 
-# ── 全局 StealthySession（复用同一浏览器进程）────────────
-# Session 在整个 Python 进程生命周期内复用，避免反复启动浏览器
-_session = None
-
-
-def _get_session():
-    """懒加载：首次调用时启动浏览器，之后复用。"""
-    global _session
-    if _session is None:
-        logger.info("启动 StealthyFetcher 浏览器会话（首次较慢，约 10-20 秒）…")
-        from scrapling.fetchers import StealthyFetcher
-        _session = StealthyFetcher()
-    return _session
+# ── 请求入口 ──────────────────────────────────────────────
 
 
 def _fetch(url: str) -> object | None:
-    """统一的请求入口，复用 session，失败时返回 None。"""
+    """统一请求入口：scrapling 0.4.x 用 Fetcher.get()（classmethod，无需浏览器）。"""
     try:
-        session = _get_session()
-        return session.get(url, stealthy_headers=True)
+        from scrapling.fetchers import Fetcher
+        return Fetcher.get(url)
     except Exception as e:
         logger.error("请求失败 [%s]: %s", url, e)
         return None
@@ -170,13 +158,9 @@ def _parse_search_results(page, base: str) -> list[dict]:
                         continue
                     seen_ids.add(bangumi_id)
 
-                    # 获取标题：依次尝试 .bangumi-title、p、span、自身文本
-                    title_el = (
-                        item.css_first(".bangumi-title")
-                        or item.css_first("p")
-                        or item.css_first("span")
-                    )
-                    name = title_el.text.strip() if title_el else item.text.strip()
+                    # 获取标题：用 get_all_text() 提取元素内全部文本
+                    # （标题在 span 内的纯文本节点，.text 只取直接文本节点会为空）
+                    name = item.get_all_text().strip() if hasattr(item, "get_all_text") else item.text.strip()
                     if not name:
                         continue
 
@@ -254,24 +238,30 @@ def _parse_subgroups(page) -> list[dict]:
                 try:
                     sg_id = None
 
-                    # 从 data-anchor 属性解析 id：".js-subgroup-item-562" → 562
                     anchor = item.attrib.get("data-anchor", "") if hasattr(item, "attrib") else ""
                     if anchor:
-                        m_id = anchor.split("-")[-1].strip(")")
-                        if m_id.isdigit():
-                            sg_id = int(m_id)
+                        # 新格式：#1231  旧格式：.js-subgroup-item-562
+                        stripped = anchor.lstrip("#.")
+                        if stripped.isdigit():
+                            sg_id = int(stripped)
+                        else:
+                            tail = anchor.split("-")[-1].strip(")")
+                            if tail.isdigit():
+                                sg_id = int(tail)
 
-                    # 从 href 解析
+                    # 从 href 解析（#1231 形式）
                     if sg_id is None:
                         href = item.attrib.get("href", "") if hasattr(item, "attrib") else ""
-                        if href and href.strip("#").isdigit():
-                            sg_id = int(href.strip("#"))
+                        if href and href.lstrip("#").isdigit():
+                            sg_id = int(href.lstrip("#"))
 
                     if sg_id is None or sg_id in seen_ids:
                         continue
                     seen_ids.add(sg_id)
 
-                    name = item.text.strip() if hasattr(item, "text") else str(item)
+                    name = (item.get_all_text().strip()
+                            if hasattr(item, "get_all_text")
+                            else item.text.strip())
                     if name:
                         results.append({"id": sg_id, "name": name})
 
