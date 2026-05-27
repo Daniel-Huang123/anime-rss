@@ -1,0 +1,25 @@
+# 番剧自动订阅下载 — 配置示例
+# 复制为 config.yaml 并修改以下内容
+
+qbittorrent:
+  host: localhost
+  port: 8080
+  username: admin
+  password: your_password_here
+  save_path: "D:/Anime"        # 下载保存根目录（也作为媒体库扫描路径）
+
+# 字幕组优先级（名称包含关键词即匹配，不区分大小写）
+subtitle_priorities:
+  - ANi
+  - kirara
+
+resource_check:
+  recent_weeks: 4              # 判断"有资源"的时间窗口（周数）
+
+cleanup:
+  keep_quarters: 2             # 保留最近 N 个季度
+  delete_files: true
+
+advanced:
+  use_mirror: false            # 使用 mikanime.tv 镜像
+  request_delay: 1.0           # 批量订阅请求间隔（秒）
