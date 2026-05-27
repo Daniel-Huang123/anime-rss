@@ -459,6 +459,27 @@ def _title_variants(title: str) -> list[str]:
     return variants
 
 
+# ── 辅助：获取某字幕组 RSS 最新一条的发布时间 ────────────
+
+
+def _latest_rss_time(
+    bangumi_id: int,
+    subgroup_id: int,
+    use_mirror: bool = False,
+) -> "datetime | None":
+    """返回该字幕组 RSS 最新一条的发布时间；解析失败返回 None。"""
+    base = MIKAN_MIRROR if use_mirror else MIKAN_BASE
+    try:
+        feed = feedparser.parse(build_rss_url(bangumi_id, subgroup_id, base))
+        for entry in feed.entries:
+            pub = entry.get("published_parsed")
+            if pub:
+                return datetime(*pub[:6], tzinfo=timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
 # ── 完整流程（搜索 + 选择最佳 RSS）──────────────────────
 
 
@@ -473,6 +494,12 @@ def resolve_anime_rss(
     一步完成：搜索番剧 → 找最佳 RSS。
 
     search_override：用于手动指定蜜柑搜索词（跳过自动变体逻辑）。
+
+    选择策略：
+    - 精确命中（用原始标题搜到）：取前 3 候选，选第一个有资源的（快速）
+    - 模糊命中（用缩短/变体词搜到，或手动 override）：
+        遍历所有候选，优先字幕组优先级，但在多个候选均有资源时
+        选 RSS 最近更新时间最新的（避免误选老季度）
 
     返回：
     {
@@ -491,12 +518,15 @@ def resolve_anime_rss(
     else:
         search_terms = _title_variants(title)
 
-    # 逐个变体搜索，找到候选即停
+    # 逐个变体搜索，找到候选即停；记录是否用了非原始词（fallback）
     candidates: list[dict] = []
-    for term in search_terms:
+    is_fallback = bool(search_override)  # 手动 override 也走 fallback 策略
+    for i, term in enumerate(search_terms):
         candidates = search_bangumi(term, use_mirror)
         if candidates:
-            logger.info("搜索词 '%s' 命中 %d 个候选", term, len(candidates))
+            if not search_override:
+                is_fallback = (i > 0)
+            logger.info("搜索词 '%s' 命中 %d 个候选 (fallback=%s)", term, len(candidates), is_fallback)
             break
         logger.info("搜索词 '%s' 无结果，尝试下一变体", term)
 
@@ -504,17 +534,44 @@ def resolve_anime_rss(
         logger.warning("未在蜜柑计划找到：%s（尝试词：%s）", title, search_terms)
         return None
 
-    # 取前3个候选，选第一个有资源的
-    for candidate in candidates[:3]:
-        best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
-        if best:
-            return {
-                "title": title,
-                "bangumi_id": candidate["id"],
-                "bangumi_name": candidate["name"],
-                **best,
-            }
-        time.sleep(0.5)
+    if not is_fallback:
+        # ── 精确命中：取前3，选第一个有资源的 ─────────────
+        for candidate in candidates[:3]:
+            best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
+            if best:
+                return {
+                    "title": title,
+                    "bangumi_id": candidate["id"],
+                    "bangumi_name": candidate["name"],
+                    **best,
+                }
+            time.sleep(0.5)
+    else:
+        # ── 模糊命中：遍历所有候选，选最近更新的有效资源 ──
+        # 用于「石纪元」等搜到多个季度的情形，确保选到当前连载季
+        logger.info("模糊匹配，对 %d 个候选按更新时间择优...", len(candidates))
+        best_result: dict | None = None
+        best_time: "datetime | None" = None
+
+        for candidate in candidates:
+            best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
+            if best:
+                latest = _latest_rss_time(candidate["id"], best["subgroup_id"], use_mirror)
+                if best_result is None or (
+                    latest is not None
+                    and (best_time is None or latest > best_time)
+                ):
+                    best_result = {
+                        "title": title,
+                        "bangumi_id": candidate["id"],
+                        "bangumi_name": candidate["name"],
+                        **best,
+                    }
+                    best_time = latest
+            time.sleep(0.3)
+
+        if best_result:
+            return best_result
 
     logger.warning("'%s' 的所有候选番剧均无合适资源", title)
     return None
