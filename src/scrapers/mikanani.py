@@ -334,25 +334,37 @@ def find_best_rss(
             "rss_url": build_rss_url(bangumi_id, sg["id"], base),
         }
 
-    # 阶段1：按优先级匹配
+    # 阶段1：按优先级顺序，第一个名称匹配即直接返回（不验证 RSS）
+    # 优先组（ANi/kirara）活跃度有保证，跳过 RSS 检查节省 1-2 秒/番
     for priority in priorities:
         for sg in subgroups:
             if priority.lower() in sg["name"].lower():
-                logger.info("检查优先字幕组 [%s] 资源...", sg["name"])
-                if has_recent_resources(bangumi_id, sg["id"], weeks, use_mirror):
-                    logger.info("✓ 使用字幕组 [%s]", sg["name"])
-                    return build_result(sg)
-                else:
-                    logger.info("✗ 字幕组 [%s] 最近无更新，跳过", sg["name"])
+                logger.info("✓ 优先字幕组 [%s] 直接使用", sg["name"])
+                return build_result(sg)
 
-    # 阶段2：回退任意有资源的组
-    logger.info("优先字幕组无资源，回退搜索...")
-    for sg in subgroups:
-        if has_recent_resources(bangumi_id, sg["id"], weeks, use_mirror):
-            logger.info("回退使用字幕组 [%s]", sg["name"])
-            return build_result(sg)
+    # 阶段2：回退——并行检查所有字幕组，取第一个有条目的
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
-    logger.warning("番剧 %d 所有字幕组均无近期资源", bangumi_id)
+    logger.info("无优先字幕组，并行检查 %d 个组...", len(subgroups))
+
+    def _check(sg: dict) -> dict | None:
+        return sg if has_recent_resources(bangumi_id, sg["id"], weeks, use_mirror) else None
+
+    # 保留原始顺序优先：先完成的返回，但按 subgroups 顺序作二次保底
+    found: dict | None = None
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        future_to_sg = {pool.submit(_check, sg): sg for sg in subgroups}
+        for future in _as_completed(future_to_sg):
+            result_sg = future.result()
+            if result_sg and found is None:
+                found = result_sg
+                # 不 break：让其他 future 完成，避免线程泄漏
+
+    if found:
+        logger.info("回退使用字幕组 [%s]", found["name"])
+        return build_result(found)
+
+    logger.warning("番剧 %d 所有字幕组均无资源", bangumi_id)
     return None
 
 

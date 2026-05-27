@@ -224,12 +224,16 @@ for day in ordered_days:
                 unsafe_allow_html=True,
             )
 
-            # Metadata：播出时间 + 集数
-            time_str = f"{broadcast}".strip()
-            if time_str:
-                st.caption(f"🕐 {time_str}")
-            if episodes:
-                st.caption(f"📺 {episodes}")
+            # Metadata：播出时间 + 集数（固定两行高度，空值显示破折号）
+            time_str = str(broadcast).strip() or "—"
+            ep_str   = str(episodes).strip()  or "—"
+            st.markdown(
+                f'<div style="font-size:0.75em;color:#888;line-height:1.6;'
+                f'min-height:3.2em;margin:2px 0 4px;">'
+                f'🕐 {time_str}<br>📺 {ep_str}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
             # 订阅按钮 / 已订阅标记 / 搜索失败重试
             fail_key   = f"fail_{gidx}"
@@ -237,8 +241,10 @@ for day in ordered_days:
 
             if is_sub:
                 st.markdown(
-                    '<p style="color:#00c853;font-size:0.85em;text-align:center;'
-                    'margin:4px 0;font-weight:700;">✓ 已订阅</p>',
+                    '<div style="min-height:2.1em;display:flex;align-items:center;'
+                    'justify-content:center;">'
+                    '<span style="color:#00c853;font-size:0.85em;font-weight:700;">'
+                    '✓ 已订阅</span></div>',
                     unsafe_allow_html=True,
                 )
 
