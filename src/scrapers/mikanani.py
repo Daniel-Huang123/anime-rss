@@ -137,10 +137,12 @@ def _parse_search_results(page, base: str) -> list[dict]:
     seen_ids: set[int] = set()
 
     # 尝试多种选择器（页面结构可能调整）
+    # 优先级：旧版带 class/属性的选择器 → 新版直接匹配 /Home/Bangumi/ 链接
     selectors = [
         "a.js-bangumi-item",
         "a[data-bangumi-id]",
         ".bangumi-list a",
+        "a[href*='/Home/Bangumi/']",   # 新版页面：<a href="/Home/Bangumi/3899"><span>标题</span></a>
     ]
 
     for selector in selectors:
@@ -160,15 +162,23 @@ def _parse_search_results(page, base: str) -> list[dict]:
                     if bangumi_id is None:
                         href = item.attrib.get("href", "") if hasattr(item, "attrib") else ""
                         if "/Bangumi/" in href:
-                            bangumi_id = int(href.split("/Bangumi/")[-1].strip("/"))
+                            tail = href.split("/Bangumi/")[-1].strip("/")
+                            if tail.isdigit():
+                                bangumi_id = int(tail)
 
                     if bangumi_id is None or bangumi_id in seen_ids:
                         continue
                     seen_ids.add(bangumi_id)
 
-                    # 获取标题
-                    title_el = item.css_first(".bangumi-title") or item.css_first("p")
+                    # 获取标题：依次尝试 .bangumi-title、p、span、自身文本
+                    title_el = (
+                        item.css_first(".bangumi-title")
+                        or item.css_first("p")
+                        or item.css_first("span")
+                    )
                     name = title_el.text.strip() if title_el else item.text.strip()
+                    if not name:
+                        continue
 
                     results.append({
                         "id": bangumi_id,
@@ -379,41 +389,68 @@ def find_best_rss(
 
 import re as _re
 
+# 阿拉伯数字 ↔ 汉字（季数范围内够用）
+_A2C = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五",
+        "6": "六", "7": "七", "8": "八", "9": "九"}
+_C2A = {v: k for k, v in _A2C.items()}
+
+# 匹配标题末尾的季数标记（保留前导空格/下划线供替换）
+_SEASON_SUFFIX = _re.compile(
+    r"([\s_]*)(第)([一二三四五六七八九十百\d]+)([季期])\s*$"
+)
+
 
 def _title_variants(title: str) -> list[str]:
     """
     为标题生成搜索变体列表，按优先级排列。
 
     常见导致搜索失败的原因：
-      - yuc.wiki 使用中文标题，蜜柑使用略有差异的中文或日文名
-      - 标题带有"第3季/第4期"后缀，蜜柑可能只有干净的名字
+      - yuc.wiki 使用「第X期」，蜜柑统一用「第X季」（且连接符可能是空格或下划线）
+      - 阿拉伯数字 vs 汉字（第2季 vs 第二季）
+      - 末尾季数不同但主标题一致
 
     策略（依次尝试）：
       1. 原标题
-      2. 去末尾季数标记（第X季/第X期/Season N）
-      3. 第一个空格/冒号/中点前的部分（适用于"XX XX第2期"之类）
-      4. 标题前6字（最后兜底）
+      2. 季数变体：期↔季、阿拉伯↔汉字、空格↔下划线 的全组合（在原标题末尾有季标时）
+      3. 去末尾季数后的基础标题
+      4. 第一个空格/冒号/中点前的部分
+      5. 标题前6字（最后兜底）
     """
     variants: list[str] = [title]
 
-    # 去末尾季数
+    # ── 季数变体 ──────────────────────────────────────────
+    m = _SEASON_SUFFIX.search(title)
+    if m:
+        base = title[: m.start()]          # 季标前的主标题
+        num  = m.group(3)                  # 数字部分，如 "2" 或 "二"
+        alt_num = _A2C.get(num) or _C2A.get(num) or num   # 互换形式
+
+        # 生成 期/季 × 数字/汉字 × 空格/下划线 的全组合，去重后追加
+        for n in dict.fromkeys([num, alt_num]):          # 保持顺序去重
+            for suf in ("季", "期"):
+                for sep in (" ", "_"):
+                    candidate = f"{base}{sep}第{n}{suf}"
+                    if candidate not in variants:
+                        variants.append(candidate)
+
+    # ── 去末尾季标，保留基础标题 ─────────────────────────
     no_season = _re.sub(
-        r"\s*(第[一二三四五六七八九十百\d]+[季期]|Season\s*\d+|S\d+)\s*$",
+        r"[\s_]*(第[一二三四五六七八九十百\d]+[季期]|Season\s*\d+|S\d+)\s*$",
         "", title,
     ).strip()
-    if no_season and no_season != title:
+    if no_season and no_season != title and no_season not in variants:
         variants.append(no_season)
 
-    # 第一个分隔符前的短标题
+    # ── 第一个分隔符前的部分 ──────────────────────────────
     for sep in (" ", "：", ":", "·", "・", "～", "~"):
         idx = title.find(sep)
-        if idx >= 3:  # 前缀至少3字有意义
+        if idx >= 3:
             part = title[:idx].strip()
             if part not in variants:
                 variants.append(part)
             break
 
-    # 前6字兜底（仅当标题较长时）
+    # ── 前6字兜底 ─────────────────────────────────────────
     if len(title) > 8:
         short = title[:6]
         if short not in variants:
