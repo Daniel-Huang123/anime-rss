@@ -82,8 +82,9 @@ def fetch_cover_from_mikanani(bangumi_id: int) -> Path | None:
 
     url = f"https://mikanani.me/Home/Bangumi/{bangumi_id}"
     try:
-        from scrapling import StealthyFetcher
-        page = StealthyFetcher(auto_match=False).get(url, stealthy_headers=True)
+        # 复用 mikanani 模块的全局 session，避免重复启动浏览器
+        from src.scrapers.mikanani import _fetch
+        page = _fetch(url)
 
         # 找封面 img：src 包含 /images/Bangumi/
         img = page.css_first("img[src*='/images/Bangumi/']")

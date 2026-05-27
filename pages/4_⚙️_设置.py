@@ -115,7 +115,7 @@ if st.button("💾 保存配置", type="primary", use_container_width=False):
             "port": int(port),
             "username": username,
             "password": password,
-            "save_path": save_path,
+            "save_path": save_path.strip().strip('"').strip("'"),  # 去除用户多输入的引号
         },
         "subtitle_priorities": new_priorities,
         "resource_check": {"recent_weeks": int(recent_weeks)},

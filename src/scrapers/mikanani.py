@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import feedparser
@@ -20,6 +22,68 @@ logger = logging.getLogger(__name__)
 
 MIKAN_BASE = "https://mikanani.me"
 MIKAN_MIRROR = "https://mikanime.tv"  # 备用镜像（某些地区使用）
+
+# ── 磁盘缓存（搜索结果 + 字幕组列表）────────────────────
+# 缓存文件放在项目根目录，季度内基本稳定，7天过期
+_CACHE_FILE = Path(__file__).parent.parent.parent / ".mikan_cache.json"
+_CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 天
+
+
+def _load_cache() -> dict:
+    if _CACHE_FILE.exists():
+        try:
+            return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_cache(data: dict) -> None:
+    try:
+        _CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("缓存写入失败：%s", e)
+
+
+def _cache_get(key: str) -> list | None:
+    data = _load_cache()
+    entry = data.get(key)
+    if not entry:
+        return None
+    if time.time() - entry.get("ts", 0) > _CACHE_TTL_SECONDS:
+        return None  # 过期
+    return entry.get("value")
+
+
+def _cache_set(key: str, value: list) -> None:
+    data = _load_cache()
+    data[key] = {"ts": time.time(), "value": value}
+    _save_cache(data)
+
+
+# ── 全局 StealthySession（复用同一浏览器进程）────────────
+# Session 在整个 Python 进程生命周期内复用，避免反复启动浏览器
+_session = None
+
+
+def _get_session():
+    """懒加载：首次调用时启动浏览器，之后复用。"""
+    global _session
+    if _session is None:
+        logger.info("启动 StealthyFetcher 浏览器会话（首次较慢，约 10-20 秒）…")
+        from scrapling.fetchers import StealthyFetcher
+        _session = StealthyFetcher(auto_match=False)
+    return _session
+
+
+def _fetch(url: str) -> object | None:
+    """统一的请求入口，复用 session，失败时返回 None。"""
+    try:
+        session = _get_session()
+        return session.get(url, stealthy_headers=True)
+    except Exception as e:
+        logger.error("请求失败 [%s]: %s", url, e)
+        return None
 
 
 # ── RSS URL 构造 ──────────────────────────────────────────
@@ -37,20 +101,26 @@ def search_bangumi(title: str, use_mirror: bool = False) -> list[dict]:
     在蜜柑计划搜索番剧，返回候选列表。
     每条格式：{"id": int, "name": str, "url": str}
 
-    使用 StealthyFetcher 应对可能的 Cloudflare 保护。
+    命中磁盘缓存（7天有效）时直接返回，否则用复用的 StealthySession 请求。
     """
+    cache_key = f"search:{title}:{'mirror' if use_mirror else 'main'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info("搜索缓存命中：%s", title)
+        return cached
+
     base = MIKAN_MIRROR if use_mirror else MIKAN_BASE
     url = f"{base}/Home/Search?searchstr={quote(title)}"
     logger.info("搜索蜜柑：%s", url)
 
-    try:
-        from scrapling import StealthyFetcher
-        page = StealthyFetcher(auto_match=False).get(url, stealthy_headers=True)
-    except Exception as e:
-        logger.error("蜜柑搜索请求失败：%s", e)
+    page = _fetch(url)
+    if page is None:
         return []
 
-    return _parse_search_results(page, base)
+    results = _parse_search_results(page, base)
+    if results:
+        _cache_set(cache_key, results)
+    return results
 
 
 def _parse_search_results(page, base: str) -> list[dict]:
@@ -123,21 +193,26 @@ def get_subgroups(bangumi_id: int, use_mirror: bool = False) -> list[dict]:
     获取番剧页面上列出的所有字幕组。
     返回：[{"id": int, "name": str}]
 
-    番剧页 URL：https://mikanani.me/Home/Bangumi/{bangumi_id}
-    字幕组列表在左侧 .subgroup-list 或 .js-subgroup-item 中。
+    命中磁盘缓存（7天有效）时直接返回，否则用复用的 StealthySession 请求。
     """
+    cache_key = f"subgroups:{bangumi_id}:{'mirror' if use_mirror else 'main'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info("字幕组缓存命中：bangumi_id=%d", bangumi_id)
+        return cached
+
     base = MIKAN_MIRROR if use_mirror else MIKAN_BASE
     url = f"{base}/Home/Bangumi/{bangumi_id}"
     logger.info("获取字幕组列表：%s", url)
 
-    try:
-        from scrapling import StealthyFetcher
-        page = StealthyFetcher(auto_match=False).get(url, stealthy_headers=True)
-    except Exception as e:
-        logger.error("获取字幕组失败：%s", e)
+    page = _fetch(url)
+    if page is None:
         return []
 
-    return _parse_subgroups(page)
+    results = _parse_subgroups(page)
+    if results:
+        _cache_set(cache_key, results)
+    return results
 
 
 def _parse_subgroups(page) -> list[dict]:
