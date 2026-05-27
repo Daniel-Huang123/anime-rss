@@ -1,8 +1,15 @@
-"""季度订阅页面：从 yuc.wiki 加载当季番单 → 勾选 → 批量添加到 qBittorrent。"""
+"""季度订阅页面：卡片网格浏览 + 一键订阅。
 
-import time
+UI 设计：
+  - 5 列封面卡片，封面带绿色边框表示已订阅
+  - 点击「＋ 订阅」按钮直接触发搜索并添加到 qBittorrent
+  - 卡片底部同时显示集数（imgep）和首播时间（imgtext4）两行 metadata
+"""
 
-import pandas as pd
+from __future__ import annotations
+
+import base64
+
 import requests
 import streamlit as st
 
@@ -12,7 +19,7 @@ from src.scrapers.yuc_wiki import clear_cache, get_season_list
 from src.utils.config import load_config
 from src.utils.cover_cache import get_or_fetch_cover
 from src.utils.season import list_season_options, quarter_to_ym
-from src.utils.state import add_subscription, is_subscribed
+from src.utils.state import add_subscription, get_subscriptions
 
 st.set_page_config(page_title="季度订阅", page_icon="📺", layout="wide")
 st.title("📺 季度订阅")
@@ -24,10 +31,9 @@ except FileNotFoundError:
     st.error("请先在「设置」页面完成配置。")
     st.stop()
 
-priorities = cfg.get("subtitle_priorities", ["ANi", "kirara"])
-weeks = cfg.get("resource_check", {}).get("recent_weeks", 4)
-delay = cfg.get("advanced", {}).get("request_delay", 1.0)
-use_mirror = cfg.get("advanced", {}).get("use_mirror", False)
+priorities  = cfg.get("subtitle_priorities", ["ANi", "kirara"])
+weeks       = cfg.get("resource_check", {}).get("recent_weeks", 4)
+use_mirror  = cfg.get("advanced", {}).get("use_mirror", False)
 
 qbt_cfg = cfg["qbittorrent"]
 qbt = QBTClient(
@@ -37,57 +43,19 @@ qbt = QBTClient(
     password=qbt_cfg["password"],
 )
 
-# ── 季度选择 ──────────────────────────────────────────────
-col1, col2 = st.columns([2, 1])
-with col1:
-    season_options = list_season_options(6)
-    selected_quarter = st.selectbox("选择季度", season_options, index=0)
 
-with col2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    load_btn = st.button("🔄 从 yuc.wiki 加载番单", use_container_width=True)
-    refresh_btn = st.button("🔃 刷新缓存重新加载", use_container_width=True)
-
-# ── 加载番单 ──────────────────────────────────────────────
-if refresh_btn:
-    clear_cache()
-    st.session_state.pop("anime_list", None)
-
-if load_btn:
-    st.session_state.pop("anime_list", None)
-
-if "anime_list" not in st.session_state:
-    year, month = quarter_to_ym(selected_quarter)
-    with st.spinner(f"正在爬取 yuc.wiki/{year:04d}{month:02d} ..."):
-        try:
-            anime_list = get_season_list(year, month)
-            st.session_state["anime_list"] = anime_list
-            st.session_state["loaded_quarter"] = selected_quarter
-            if anime_list:
-                st.success(f"✓ 加载成功，共 {len(anime_list)} 部番剧")
-        except Exception as e:
-            st.error(f"加载失败：{e}")
-            st.stop()
-
-anime_list = st.session_state.get("anime_list", [])
-loaded_quarter = st.session_state.get("loaded_quarter", selected_quarter)
-
-if not anime_list:
-    st.info("点击「从 yuc.wiki 加载番单」开始")
-    st.stop()
-
+# ── 封面下载（带 Bilibili CDN Referer 修正，session 级缓存）────
 @st.cache_data(show_spinner=False)
-def _fetch_cover_bytes(url: str) -> bytes | None:
-    """后端下载封面（Bilibili CDN 需要正确 Referer，不能让浏览器直接请求）。"""
+def _cover_bytes(url: str) -> bytes | None:
     if not url:
         return None
+    referer = "https://www.bilibili.com/" if "hdslb.com" in url or "bilibili" in url else "https://yuc.wiki/"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://www.bilibili.com/" if "hdslb.com" in url or "bilibili" in url else "https://yuc.wiki/",
+        "Referer": referer,
     }
     try:
         r = requests.get(url, headers=headers, timeout=8)
@@ -98,154 +66,162 @@ def _fetch_cover_bytes(url: str) -> bytes | None:
     return None
 
 
-# ── 封面网格预览（折叠） ──────────────────────────────────
-with st.expander(f"🖼️ 番剧封面预览（{len(anime_list)} 部）", expanded=False):
-    cover_cols = st.columns(8)
-    for idx, anime in enumerate(anime_list[:40]):  # 最多展示40个
-        with cover_cols[idx % 8]:
-            cover_url = anime.get("cover_url")
-            if cover_url:
-                img_bytes = _fetch_cover_bytes(cover_url)
-                if img_bytes:
-                    st.image(img_bytes, width=80, caption=anime["title"][:6])
-                else:
-                    st.caption(anime["title"][:8])
-            else:
-                st.caption(f"🎬 {anime['title'][:6]}")
+def _cover_html(img_bytes: bytes | None, subscribed: bool) -> str:
+    """生成封面 HTML：订阅 → 绿色边框，未订阅 → 暗灰色。"""
+    border = "#00c853" if subscribed else "#2d2d2d"
+    box_style = (
+        f"border:3px solid {border};border-radius:8px;overflow:hidden;"
+        f"background:#1e1e2e;aspect-ratio:5/7;"
+    )
+    if img_bytes:
+        b64 = base64.b64encode(img_bytes).decode()
+        return (
+            f'<div style="{box_style}">'
+            f'<img src="data:image/jpeg;base64,{b64}" '
+            f'style="width:100%;height:100%;object-fit:cover;display:block;">'
+            f'</div>'
+        )
+    return (
+        f'<div style="{box_style}display:flex;align-items:center;'
+        f'justify-content:center;font-size:2em;">🎬</div>'
+    )
 
-# ── 番单表格（可勾选）────────────────────────────────────
-st.subheader(f"📋 {loaded_quarter} 番剧列表（{len(anime_list)} 部）")
 
-# 构造 DataFrame
-df_data = []
-for a in anime_list:
-    subscribed = is_subscribed(loaded_quarter, a["title"])
-    df_data.append({
-        "订阅": not subscribed,
-        "番剧": a["title"],
-        "集数": a["episodes"],
-        "播出日": a["day"],
-        "状态": a["status"],
-        "平台": "、".join(a["platforms"][:3]) if a["platforms"] else "",
-        "已订阅": "✓" if subscribed else "",
-    })
+# ── 季度选择栏 ────────────────────────────────────────────
+c1, c2, c3 = st.columns([3, 1, 1])
+with c1:
+    season_options   = list_season_options(6)
+    selected_quarter = st.selectbox("季度", season_options, index=0, label_visibility="collapsed")
+with c2:
+    load_btn    = st.button("🔄 加载番单", use_container_width=True)
+with c3:
+    refresh_btn = st.button("🔃 刷新缓存", use_container_width=True)
 
-df = pd.DataFrame(df_data)
-
-# 筛选
-col_f1, col_f2 = st.columns([3, 1])
-with col_f1:
-    search_kw = st.text_input("🔍 筛选番名", placeholder="输入关键词过滤")
-with col_f2:
-    hide_subscribed = st.checkbox("隐藏已订阅", value=True)
-
-if search_kw:
-    df = df[df["番剧"].str.contains(search_kw, case=False, na=False)]
-if hide_subscribed:
-    df = df[df["已订阅"] != "✓"]
-
-edited_df = st.data_editor(
-    df,
-    column_config={
-        "订阅": st.column_config.CheckboxColumn("订阅", default=True, width="small"),
-        "番剧": st.column_config.TextColumn("番剧", width="large"),
-        "集数": st.column_config.TextColumn("集数", width="small"),
-        "播出日": st.column_config.TextColumn("播出日", width="small"),
-        "状态": st.column_config.TextColumn("状态", width="small"),
-        "平台": st.column_config.TextColumn("平台", width="medium"),
-        "已订阅": st.column_config.TextColumn("已订阅", width="small"),
-    },
-    disabled=["番剧", "集数", "播出日", "状态", "平台", "已订阅"],
-    use_container_width=True,
-    hide_index=True,
-    height=400,
-)
-
-selected = edited_df[edited_df["订阅"] == True]["番剧"].tolist()
-already = [a["title"] for a in anime_list if is_subscribed(loaded_quarter, a["title"])]
-
-col_s1, col_s2, col_s3 = st.columns([2, 2, 1])
-with col_s1:
-    st.caption(f"已勾选 **{len(selected)}** 部待订阅")
-with col_s2:
-    st.caption(f"已订阅 **{len(already)}** 部")
-with col_s3:
-    start_btn = st.button("🚀 开始订阅", type="primary", disabled=not selected, use_container_width=True)
-
-# ── 批量订阅 ──────────────────────────────────────────────
-if start_btn and selected:
-    # 建立 title → cover_url 的映射（来自 yuc.wiki）
-    cover_map = {a["title"]: a.get("cover_url") for a in anime_list}
-
-    st.divider()
-    st.subheader("⏳ 订阅进度")
-
-    progress = st.progress(0)
-    status_container = st.container()
-    results_log = []
-
-    total = len(selected)
-    for i, title in enumerate(selected):
-        with status_container:
-            st.write(f"**[{i+1}/{total}]** 正在处理：{title} ...")
-
-        yuc_cover_url = cover_map.get(title)
-
-        # 1. 在蜜柑计划搜索
-        result = resolve_anime_rss(title, priorities, weeks, use_mirror)
-
-        if result is None:
-            msg = f"❌ **{title}** — 蜜柑计划未找到合适资源"
-            results_log.append(("error", msg))
-        else:
-            # 2. 下载封面（优先用 yuc.wiki，备选 mikanani）
-            cover_url_to_save = yuc_cover_url
-            cover_path = get_or_fetch_cover(
-                title=title,
-                bangumi_id=result["bangumi_id"],
-                cover_url=yuc_cover_url,
-            )
-
-            # 3. 添加 RSS 到 qBittorrent
-            ok, qbt_msg = qbt.add_rss_feed(
-                url=result["rss_url"],
-                path=f"{loaded_quarter}/{title}",
-            )
-
-            if ok:
-                # 4. 保存到 state.json（含封面 URL）
-                add_subscription(
-                    quarter=loaded_quarter,
-                    title=title,
-                    bangumi_id=result["bangumi_id"],
-                    subgroup_id=result["subgroup_id"],
-                    subgroup_name=result["subgroup_name"],
-                    rss_url=result["rss_url"],
-                    cover_url=cover_url_to_save,
-                )
-                cover_hint = "🖼️" if cover_path else ""
-                msg = f"✅ **{title}** — 字幕组：{result['subgroup_name']} {cover_hint}"
-                results_log.append(("success", msg))
-            else:
-                msg = f"⚠️ **{title}** — RSS 已找到但添加 qBit 失败：{qbt_msg}"
-                results_log.append(("warning", msg))
-
-        progress.progress((i + 1) / total)
-        time.sleep(delay)
-
-    # 汇总结果
-    st.divider()
-    success = sum(1 for t, _ in results_log if t == "success")
-    error   = sum(1 for t, _ in results_log if t == "error")
-    warning = sum(1 for t, _ in results_log if t == "warning")
-    st.success(f"完成！成功 {success} 部 | 失败 {error} 部 | 警告 {warning} 部")
-
-    for typ, msg in results_log:
-        if typ == "success":
-            st.success(msg)
-        elif typ == "error":
-            st.error(msg)
-        else:
-            st.warning(msg)
-
+if refresh_btn:
+    clear_cache()
+    _cover_bytes.clear()
     st.session_state.pop("anime_list", None)
+    st.session_state.pop("loaded_quarter", None)
+
+if load_btn:
+    st.session_state.pop("anime_list", None)
+
+if "anime_list" not in st.session_state:
+    year, month = quarter_to_ym(selected_quarter)
+    with st.spinner(f"正在爬取 yuc.wiki/{year:04d}{month:02d} ..."):
+        try:
+            anime_list = get_season_list(year, month)
+            st.session_state["anime_list"]      = anime_list
+            st.session_state["loaded_quarter"]  = selected_quarter
+        except Exception as e:
+            st.error(f"加载失败：{e}")
+            st.stop()
+
+anime_list    = st.session_state.get("anime_list", [])
+loaded_quarter = st.session_state.get("loaded_quarter", selected_quarter)
+
+if not anime_list:
+    st.info("点击「加载番单」开始")
+    st.stop()
+
+# ── 预加载已订阅集合（避免每卡多次读文件）─────────────────
+subbed_titles: set[str] = {
+    s["title"]
+    for s in get_subscriptions(loaded_quarter).get(loaded_quarter, [])
+}
+
+sub_count = len(subbed_titles)
+
+# ── 筛选栏 ───────────────────────────────────────────────
+fc1, fc2 = st.columns([4, 1])
+with fc1:
+    search_kw = st.text_input(
+        "搜索", placeholder="🔍 输入关键词筛选番名",
+        label_visibility="collapsed",
+    )
+with fc2:
+    hide_subbed = st.checkbox("隐藏已订阅", value=False)
+
+display_list = anime_list
+if search_kw:
+    display_list = [a for a in display_list if search_kw.lower() in a["title"].lower()]
+if hide_subbed:
+    display_list = [a for a in display_list if a["title"] not in subbed_titles]
+
+st.caption(
+    f"**{loaded_quarter}** · 共 {len(anime_list)} 部 "
+    f"· 已订阅 **{sub_count}** 部 · 显示 {len(display_list)} 部"
+)
+st.divider()
+
+# ── 卡片网格 ─────────────────────────────────────────────
+COLS = 5
+
+for row_start in range(0, len(display_list), COLS):
+    row_items = list(enumerate(display_list[row_start:row_start + COLS], start=row_start))
+    cols = st.columns(COLS, gap="small")
+
+    for col_obj, (gidx, anime) in zip(cols, row_items):
+        title      = anime["title"]
+        cover_url  = anime.get("cover_url") or ""
+        broadcast  = anime.get("broadcast_time", "")
+        episodes   = anime.get("episodes", "")
+        day        = anime.get("day", "")
+        is_sub     = title in subbed_titles
+
+        with col_obj:
+            # ── 封面 ──
+            img_bytes = _cover_bytes(cover_url)
+            st.markdown(_cover_html(img_bytes, is_sub), unsafe_allow_html=True)
+
+            # ── 标题（最多 2 行） ──
+            disp_title = title[:16] + "…" if len(title) > 16 else title
+            st.markdown(
+                f'<p style="font-size:0.8em;font-weight:600;margin:4px 0 2px;'
+                f'line-height:1.3;min-height:2.4em;word-break:break-all;">'
+                f'{disp_title}</p>',
+                unsafe_allow_html=True,
+            )
+
+            # ── Metadata：播出时间 + 集数（两列均显示）──
+            time_str = f"{day} {broadcast}".strip() if (day or broadcast) else ""
+            if time_str:
+                st.caption(f"🕐 {time_str}")
+            if episodes:
+                st.caption(f"📺 {episodes}")
+
+            # ── 订阅按钮 / 已订阅标记 ──
+            if is_sub:
+                st.markdown(
+                    '<p style="color:#00c853;font-size:0.85em;text-align:center;'
+                    'margin:4px 0;font-weight:700;">✓ 已订阅</p>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button("＋ 订阅", key=f"sub_{gidx}", use_container_width=True, type="primary"):
+                    with st.spinner(f"订阅 {title[:12]}..."):
+                        result = resolve_anime_rss(title, priorities, weeks, use_mirror)
+
+                    if result is None:
+                        st.error("蜜柑计划未找到合适资源", icon="❌")
+                    else:
+                        ok, qbt_msg = qbt.add_rss_feed(
+                            url=result["rss_url"],
+                            path=f"{loaded_quarter}/{title}",
+                        )
+                        if ok:
+                            get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
+                            add_subscription(
+                                quarter=loaded_quarter,
+                                title=title,
+                                bangumi_id=result["bangumi_id"],
+                                subgroup_id=result["subgroup_id"],
+                                subgroup_name=result["subgroup_name"],
+                                rss_url=result["rss_url"],
+                                cover_url=cover_url or None,
+                            )
+                            # 更新本地已订阅集合，使封面立刻变绿（无需等完整 rerun）
+                            subbed_titles.add(title)
+                            st.rerun()
+                        else:
+                            st.warning(f"RSS 已找到但添加 qBit 失败：{qbt_msg}")

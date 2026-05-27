@@ -82,6 +82,27 @@ def _parse_html_raw(html_content: str) -> list[dict]:
     seen: set[str] = set()
 
     class YucParser(HTMLParser):
+        """
+        yuc.wiki 的每个番剧块结构：
+          <div style="float:left">
+            <div class="div_date">          ← _in_div_date
+              <p class="imgtext4">21:00~</p> ← _pending_broadcast_time
+              <p class="imgep">(全12话)</p>
+              <img data-src="cover.jpg">     ← _pending_cover
+            </div>
+            <div>
+              <table>
+                <td class="date_title_">标题[<br>第5话]</td>  ← 触发 flush
+                <tr class="tr_area"><a>平台</a></tr>
+              </table>
+            </div>
+          </div>
+
+        关键设计：img/imgtext4 在 date_title 之前出现，所以用 _pending_*
+        保存，等 date_title 触发时先 flush 上一部，再把 _pending_* 转移到
+        _current_* 供新番剧使用。
+        """
+
         def __init__(self):
             super().__init__()
             self.current_day = "未知"
@@ -89,18 +110,25 @@ def _parse_html_raw(html_content: str) -> list[dict]:
             # 状态标志
             self._in_date2 = False
             self._in_date_title = False
+            self._title_done = False      # <br> 后停止捕获标题
             self._in_imgep = False
-            self._in_imgtext2 = False
+            self._in_imgtext4 = False     # 播出时间段，如 "21:00~"
+            self._in_imgtext2 = False     # 状态（完结等）
             self._in_tr_area = False
             self._in_platform_link = False
-            self._in_div_date = False   # <div class="div_date"> 内部
+            self._in_div_date = False
 
-            # 当前番剧临时数据
+            # pending：在 div_date 内收集，属于"即将到来"的番剧
+            self._pending_cover: str = ""
+            self._pending_broadcast_time: str = ""
+
+            # current：属于"正在处理"的番剧（date_title 触发后填入）
             self._current_title = ""
             self._current_ep = ""
+            self._current_cover: str = ""
+            self._current_broadcast_time: str = ""
             self._current_status = "连载中"
             self._current_platforms: list[str] = []
-            self._pending_cover: str = ""   # div_date 里的 data-src 暂存
 
         def handle_starttag(self, tag, attrs):
             attr_dict = dict(attrs)
@@ -110,26 +138,38 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 self._in_div_date = True
 
             elif tag == "img" and self._in_div_date:
-                # 封面图（懒加载用 data-src）
                 src = attr_dict.get("data-src") or attr_dict.get("src", "")
-                if src and ("jpg" in src or "png" in src or "webp" in src or "jpeg" in src):
+                if src and any(ext in src for ext in ("jpg", "png", "webp", "jpeg")):
                     self._pending_cover = src
 
             elif tag == "td" and "date2" in cls:
                 self._in_date2 = True
 
             elif tag == "td" and "date_title" in cls:
-                # 新番剧开始 → flush 上一条，重置状态
+                # ★ 核心修复：
+                #   1. flush 上一部（使用 _current_* 变量，与 _pending_* 无关）
+                #   2. 把 _pending_* 转移到 _current_*，开始构建新番剧
                 self._flush()
                 self._in_date_title = True
+                self._title_done = False
                 self._current_title = ""
                 self._current_ep = ""
                 self._current_status = "连载中"
                 self._current_platforms = []
-                # pending_cover 不重置，它属于紧接着的这个 date_title
+                # 转移 pending → current
+                self._current_cover = self._pending_cover
+                self._current_broadcast_time = self._pending_broadcast_time
+                self._pending_cover = ""
+                self._pending_broadcast_time = ""
+
+            elif tag == "br" and self._in_date_title:
+                # date_title_ 内 <br> 后是起始话数，不属于标题
+                self._title_done = True
 
             elif tag == "p" and "imgep" in cls:
                 self._in_imgep = True
+            elif tag == "p" and "imgtext4" in cls:
+                self._in_imgtext4 = True
             elif tag == "p" and "imgtext2" in cls:
                 self._in_imgtext2 = True
             elif tag == "tr" and "tr_area" in cls:
@@ -143,8 +183,10 @@ def _parse_html_raw(html_content: str) -> list[dict]:
             elif tag == "td":
                 self._in_date2 = False
                 self._in_date_title = False
+                self._title_done = False
             elif tag == "p":
                 self._in_imgep = False
+                self._in_imgtext4 = False
                 self._in_imgtext2 = False
             elif tag == "tr":
                 self._in_tr_area = False
@@ -159,10 +201,13 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 m = re.match(r"(周[一二三四五六日])", text)
                 if m:
                     self.current_day = m.group(1)
-            elif self._in_date_title:
+            elif self._in_date_title and not self._title_done:
                 self._current_title += text
             elif self._in_imgep:
                 self._current_ep = text
+            elif self._in_imgtext4:
+                # imgtext4 在 div_date 内，此时尚未进入 date_title，存入 pending
+                self._pending_broadcast_time = text
             elif self._in_imgtext2:
                 if "完结" in text:
                     self._current_status = "完结"
@@ -175,14 +220,16 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 seen.add(title)
                 results.append({
                     "title": title,
-                    "episodes": self._current_ep or "未知",
+                    "episodes": self._current_ep or "",
+                    "broadcast_time": self._current_broadcast_time or "",
                     "day": self.current_day,
                     "status": self._current_status,
                     "platforms": list(self._current_platforms),
-                    "cover_url": self._pending_cover or None,
+                    "cover_url": self._current_cover or None,
                 })
-            # 封面用完就清，避免串到下一条
-            self._pending_cover = ""
+            # 清空 current（pending 由 date_title 负责管理）
+            self._current_cover = ""
+            self._current_broadcast_time = ""
 
         def close(self):
             self._flush()
