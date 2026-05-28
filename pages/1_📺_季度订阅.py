@@ -15,12 +15,12 @@ import requests
 import streamlit as st
 
 from src.qbt.client import QBTClient
-from src.scrapers.mikanani import resolve_anime_rss
+from src.scrapers.mikanani import build_season_index, resolve_anime_rss
 from src.scrapers.yuc_wiki import clear_cache, get_season_list
 from src.utils.config import load_config
 from src.utils.cover_cache import get_or_fetch_cover
 from src.utils.season import list_season_options, quarter_to_ym
-from src.utils.state import add_subscription, get_subscriptions
+from src.utils.state import add_subscription, get_subscriptions, remove_subscription
 
 st.set_page_config(page_title="季度订阅", page_icon="📺", layout="wide")
 
@@ -60,25 +60,41 @@ qbt = QBTClient(
     username=qbt_cfg["username"], password=qbt_cfg["password"],
 )
 
-# ── 封面下载（Bilibili CDN 需 bilibili.com Referer）─────────
-@st.cache_data(show_spinner=False)
+# ── 封面磁盘缓存（只缓存成功结果，失败不写盘，下次重试）──
+import hashlib as _hashlib
+from pathlib import Path as _Path
+
+_COVER_CACHE_DIR = _Path(__file__).parent.parent / ".cover_cache"
+_COVER_CACHE_DIR.mkdir(exist_ok=True)
+
+
 def _cover_bytes(url: str) -> bytes | None:
+    """下载封面图并磁盘缓存（只缓存成功结果；失败自动重试最多 3 次）。"""
     if not url:
         return None
+    cache_path = _COVER_CACHE_DIR / (_hashlib.md5(url.encode()).hexdigest() + ".jpg")
+    if cache_path.exists():
+        return cache_path.read_bytes()
     referer = (
         "https://www.bilibili.com/"
         if ("hdslb.com" in url or "bilibili" in url)
         else "https://yuc.wiki/"
     )
-    try:
-        r = requests.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": referer,
-        }, timeout=8)
-        if r.ok and len(r.content) > 500:
-            return r.content
-    except Exception:
-        pass
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": referer,
+    }
+    import time as _time
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=hdrs, timeout=8)
+            if r.ok and len(r.content) > 500:
+                cache_path.write_bytes(r.content)
+                return r.content
+        except Exception:
+            pass
+        if attempt < 2:
+            _time.sleep(0.5 * (attempt + 1))  # 0.5s, 1.0s
     return None
 
 
@@ -115,9 +131,14 @@ with c3:
 
 if refresh_btn:
     clear_cache()
-    _cover_bytes.clear()
+    import shutil as _shutil
+    if _COVER_CACHE_DIR.exists():
+        _shutil.rmtree(_COVER_CACHE_DIR)
+        _COVER_CACHE_DIR.mkdir(exist_ok=True)
     st.session_state.pop("anime_list", None)
     st.session_state.pop("loaded_quarter", None)
+    st.session_state.pop("season_index", None)
+    st.session_state.pop("covers_prefetched", None)
 
 if load_btn:
     st.session_state.pop("anime_list", None)
@@ -129,12 +150,36 @@ if "anime_list" not in st.session_state:
             anime_list = get_season_list(year, month)
             st.session_state["anime_list"]     = anime_list
             st.session_state["loaded_quarter"] = selected_quarter
+            st.session_state.pop("season_index", None)  # 季度变更时清索引
         except Exception as e:
             st.error(f"加载失败：{e}")
             st.stop()
 
+# 构建/加载蜜柑季度索引（首次需要，后续走磁盘缓存自动命中）
+if "season_index" not in st.session_state:
+    with st.spinner("正在构建蜜柑番组索引（首次约 30-40 秒，之后自动缓存 7 天）..."):
+        st.session_state["season_index"] = build_season_index(
+            selected_quarter, use_mirror=use_mirror
+        )
+
+# 并行预取封面（只取未缓存的，已有磁盘缓存的跳过）
+if "covers_prefetched" not in st.session_state:
+    _uncached_urls = [
+        a.get("cover_url") for a in st.session_state.get("anime_list", [])
+        if a.get("cover_url") and not (
+            _COVER_CACHE_DIR / (_hashlib.md5(a["cover_url"].encode()).hexdigest() + ".jpg")
+        ).exists()
+    ]
+    if _uncached_urls:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with st.spinner(f"正在预取 {len(_uncached_urls)} 张封面..."):
+            with _TPE(max_workers=10) as _pool:
+                list(_pool.map(_cover_bytes, _uncached_urls))
+    st.session_state["covers_prefetched"] = True
+
 anime_list     = st.session_state.get("anime_list", [])
 loaded_quarter = st.session_state.get("loaded_quarter", selected_quarter)
+season_index   = st.session_state.get("season_index") or {}
 
 if not anime_list:
     st.info("点击「加载番单」开始")
@@ -169,7 +214,7 @@ st.caption(
 )
 
 # ── 按播出日分组 ──────────────────────────────────────────
-DAY_ORDER = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+DAY_ORDER = ["周一", "周二", "周三", "周四", "周五", "周六", "周日", "其他"]
 
 # 建立 全局索引 → anime 的映射（用于 button key 唯一性）
 indexed = list(enumerate(display_list))  # [(global_idx, anime), ...]
@@ -240,13 +285,42 @@ for day in ordered_days:
             retry_key  = f"retry_term_{gidx}"
 
             if is_sub:
-                st.markdown(
-                    '<div style="min-height:2.1em;display:flex;align-items:center;'
-                    'justify-content:center;">'
-                    '<span style="color:#00c853;font-size:0.85em;font-weight:700;">'
-                    '✓ 已订阅</span></div>',
-                    unsafe_allow_html=True,
-                )
+                confirm_key = f"confirm_unsub_{gidx}"
+                if st.session_state.get(confirm_key):
+                    # ── 确认取消订阅 ──────────────────────
+                    st.markdown(
+                        '<p style="color:#ff4b4b;font-size:0.75em;text-align:center;'
+                        'margin:2px 0;">确认取消订阅？</p>',
+                        unsafe_allow_html=True,
+                    )
+                    cy, cn_ = st.columns(2)
+                    with cy:
+                        if st.button("确认", key=f"usy_{gidx}",
+                                     type="primary", use_container_width=True):
+                            # 查找订阅记录拿 rss_url
+                            sub_rec = next(
+                                (s for s in get_subscriptions(loaded_quarter)
+                                 .get(loaded_quarter, [])
+                                 if s["title"] == title), None
+                            )
+                            feed_path = f"{loaded_quarter}/{title}"
+                            _sp = (f"{qbt_save_path}/{loaded_quarter}/{title}"
+                                   if qbt_save_path else "")
+                            qbt.unsubscribe(feed_path=feed_path, save_path=_sp)
+                            remove_subscription(loaded_quarter, title)
+                            subbed_titles.discard(title)
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                    with cn_:
+                        if st.button("取消", key=f"usn_{gidx}",
+                                     use_container_width=True):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                else:
+                    if st.button("✓ 已订阅", key=f"subbed_{gidx}",
+                                 use_container_width=True):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
 
             elif st.session_state.get(fail_key):
                 # ── 失败重试区 ──────────────────────────────
@@ -276,6 +350,7 @@ for day in ordered_days:
                         result = resolve_anime_rss(
                             title, priorities, weeks, use_mirror,
                             search_override=custom_term,
+                            season_index=None,  # override 时跳过索引
                         )
                     if result is None:
                         st.error("仍然未找到", icon="❌")
@@ -310,7 +385,11 @@ for day in ordered_days:
                 if st.button("＋ 订阅", key=f"sub_{gidx}",
                              use_container_width=True, type="primary"):
                     with st.spinner(f"订阅 {title[:12]}..."):
-                        result = resolve_anime_rss(title, priorities, weeks, use_mirror)
+                        result = resolve_anime_rss(
+                            title, priorities, weeks, use_mirror,
+                            season_index=season_index,
+                            quarter=loaded_quarter,
+                        )
 
                     if result is None:
                         # 记录失败，显示重试 UI

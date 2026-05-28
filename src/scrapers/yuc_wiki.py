@@ -203,21 +203,33 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 m = re.match(r"(周[一二三四五六日])", text)
                 if m:
                     self.current_day = m.group(1)
+                elif "网络放送" in text or "其他" in text:
+                    self.current_day = "其他"
             elif self._in_date_title and not self._title_done:
                 if self._title_br_pending:
                     self._title_br_pending = False
-                    # 判断 <br> 后的内容是否是集数标记（如"第5话"）
-                    # 是 → 截断标题；否 → 视为标题续行（拼接，不加空格）
+                    # 判断 <br> 后的内容：
+                    #   集数标记（第X话/集、EP X）→ 截断，不加入标题
+                    #   季号标记（第X季/期）     → 追加到标题（如"第4期"）
+                    #   其他                     → 视为标题续行
                     _EP_PATTERN = re.compile(
-                        r"^第[一二三四五六七八九十百\d]+[话集季期]"
+                        r"^第[一二三四五六七八九十百\d]+[话集]"
                         r"|^\d+话"
                         r"|^EP\d+",
                         re.IGNORECASE,
                     )
+                    _SEASON_PATTERN = re.compile(
+                        r"^第[一二三四五六七八九十百\d]+[季期]",
+                    )
                     if _EP_PATTERN.match(text):
                         self._title_done = True
-                        return  # 不把集数文字加入标题
-                self._current_title += text
+                        return  # 集数标记，截断
+                    if _SEASON_PATTERN.match(text):
+                        self._current_title += " " + text  # 季号追加到标题
+                        self._title_done = True
+                        return
+                # 续行加空格（避免"动物狂想曲最终章"这样粘连）
+                self._current_title += (" " if self._current_title else "") + text
             elif self._in_imgep:
                 self._current_ep = text
             elif self._in_imgtext4:

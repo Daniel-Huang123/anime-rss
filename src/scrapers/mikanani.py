@@ -189,24 +189,45 @@ def get_subgroups(bangumi_id: int, use_mirror: bool = False) -> list[dict]:
 
     命中磁盘缓存（7天有效）时直接返回，否则用复用的 StealthySession 请求。
     """
-    cache_key = f"subgroups:{bangumi_id}:{'mirror' if use_mirror else 'main'}"
+    return _fetch_bangumi_data(bangumi_id, use_mirror)["subgroups"]
+
+
+def _fetch_bangumi_data(bangumi_id: int, use_mirror: bool = False) -> dict:
+    """
+    获取蜜柑番剧页数据（字幕组列表 + bgm.tv subject ID），磁盘缓存 7 天。
+    返回 {"subgroups": [...], "bgm_id": int | None}
+    """
+    cache_key = f"bangumi_data:{bangumi_id}:{'mirror' if use_mirror else 'main'}"
     cached = _cache_get(cache_key)
-    if cached is not None:
-        logger.info("字幕组缓存命中：bangumi_id=%d", bangumi_id)
+    if cached is not None and "bgm_id" in cached:   # 旧缓存无此字段时重新 fetch
+        logger.info("番剧数据缓存命中：bangumi_id=%d", bangumi_id)
         return cached
 
     base = MIKAN_MIRROR if use_mirror else MIKAN_BASE
     url = f"{base}/Home/Bangumi/{bangumi_id}"
-    logger.info("获取字幕组列表：%s", url)
+    logger.info("获取番剧页面：%s", url)
 
     page = _fetch(url)
     if page is None:
-        return []
+        return {"subgroups": [], "bgm_id": None}
 
-    results = _parse_subgroups(page)
-    if results:
-        _cache_set(cache_key, results)
-    return results
+    subgroups = _parse_subgroups(page)
+    bgm_id    = _extract_bgm_id(page)
+
+    result = {"subgroups": subgroups, "bgm_id": bgm_id}
+    if subgroups:  # 只在有数据时缓存
+        _cache_set(cache_key, result)
+    return result
+
+
+def _extract_bgm_id(page) -> "int | None":
+    """从蜜柑番剧页提取 bgm.tv subject ID（如 https://bgm.tv/subject/377130）。"""
+    for link in page.css('a[href*="bgm.tv/subject/"]'):
+        href = link.attrib.get("href", "")
+        m = _re.search(r"bgm\.tv/subject/(\d+)", href)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def _parse_subgroups(page) -> list[dict]:
@@ -320,7 +341,8 @@ def find_best_rss(
       {"subgroup_id": int, "subgroup_name": str, "rss_url": str}
       或 None（没有任何组有资源）
     """
-    subgroups = get_subgroups(bangumi_id, use_mirror)
+    data = _fetch_bangumi_data(bangumi_id, use_mirror)
+    subgroups = data["subgroups"]
     if not subgroups:
         logger.warning("番剧 %d 没有找到任何字幕组", bangumi_id)
         return None
@@ -335,12 +357,13 @@ def find_best_rss(
         }
 
     # 阶段1：按优先级顺序，第一个名称匹配即直接返回（不验证 RSS）
-    # 优先组（ANi/kirara）活跃度有保证，跳过 RSS 检查节省 1-2 秒/番
     for priority in priorities:
         for sg in subgroups:
             if priority.lower() in sg["name"].lower():
                 logger.info("✓ 优先字幕组 [%s] 直接使用", sg["name"])
-                return build_result(sg)
+                r = build_result(sg)
+                r["mikan_bgm_id"] = data.get("bgm_id")
+                return r
 
     # 阶段2：回退——并行检查所有字幕组，取第一个有条目的
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
@@ -362,7 +385,9 @@ def find_best_rss(
 
     if found:
         logger.info("回退使用字幕组 [%s]", found["name"])
-        return build_result(found)
+        r = build_result(found)
+        r["mikan_bgm_id"] = data.get("bgm_id")
+        return r
 
     logger.warning("番剧 %d 所有字幕组均无资源", bangumi_id)
     return None
@@ -391,51 +416,80 @@ def _title_variants(title: str) -> list[str]:
       - yuc.wiki 使用「第X期」，蜜柑统一用「第X季」（且连接符可能是空格或下划线）
       - 阿拉伯数字 vs 汉字（第2季 vs 第二季）
       - 末尾季数不同但主标题一致
+      - 标题含中文引号/括号（如 "我爱你"），蜜柑搜索引擎不识别
 
     策略（依次尝试）：
       1. 原标题
-      2. 季数变体：期↔季、阿拉伯↔汉字、空格↔下划线 的全组合（在原标题末尾有季标时）
-      3. 去末尾季数后的基础标题
-      4. 第一个空格/冒号/中点前的部分
-      5. 标题前6字（最后兜底）
+      2. 去引号/括号的净化标题（如存在特殊字符）
+      3. 季数变体：期↔季、阿拉伯↔汉字、空格↔下划线 的全组合（在原标题末尾有季标时）
+      4. 去末尾季数后的基础标题
+      5. 第一个空格/冒号/中点前的部分
+      6. 净化后前6字（最后兜底）
     """
     variants: list[str] = [title]
 
-    # ── 季数变体 ──────────────────────────────────────────
-    m = _SEASON_SUFFIX.search(title)
-    if m:
-        base = title[: m.start()]          # 季标前的主标题
-        num  = m.group(3)                  # 数字部分，如 "2" 或 "二"
-        alt_num = _A2C.get(num) or _C2A.get(num) or num   # 互换形式
+    # ── 去引号/括号净化（放第二位，优先于季数变体）──────
+    # 中文引号 “”、单引号 ‘’、日式/全角括号等
+    # 在蜜柑搜索引擎里会导致 0 结果，需去除后重搜
+    _PUNCT_CHARS = (
+        "“”"   # " "  中文双引号
+        "‘’"   # ‘ ‘  中文单引号
+        "「」"   # 「」 日式括号
+        "『』"   # 『』 日式书名号
+        "（）"   # （） 全角圆括号
+        "【】"   # 【】 全角方括号
+        "〔〕"   # 〔〕 全角方括号2
+        "《》"   # 《》 书名号
+        "〈〉"   # 〈〉 单书名号
+    )
+    _PUNCT = str.maketrans("", "", _PUNCT_CHARS)
+    clean_title = title.translate(_PUNCT).strip()
+    if clean_title and clean_title != title and clean_title not in variants:
+        variants.append(clean_title)
 
-        # 生成 期/季 × 数字/汉字 × 空格/下划线 的全组合，去重后追加
-        for n in dict.fromkeys([num, alt_num]):          # 保持顺序去重
-            for suf in ("季", "期"):
-                for sep in (" ", "_"):
-                    candidate = f"{base}{sep}第{n}{suf}"
-                    if candidate not in variants:
-                        variants.append(candidate)
+    # 后续变体既基于 title 也基于 clean_title（以 clean 版为基础做季数变体）
+    _bases = dict.fromkeys([title, clean_title] if clean_title != title else [title])
+
+    # ── 季数变体 ──────────────────────────────────────────
+    for base_title in _bases:
+        m = _SEASON_SUFFIX.search(base_title)
+        if m:
+            base = base_title[: m.start()]          # 季标前的主标题
+            num  = m.group(3)                  # 数字部分，如 "2" 或 "二"
+            alt_num = _A2C.get(num) or _C2A.get(num) or num   # 互换形式
+
+            # 生成 期/季 × 数字/汉字 × 空格/下划线 的全组合，去重后追加
+            for n in dict.fromkeys([num, alt_num]):          # 保持顺序去重
+                for suf in ("季", "期"):
+                    for sep in (" ", "_"):
+                        candidate = f"{base}{sep}第{n}{suf}"
+                        if candidate not in variants:
+                            variants.append(candidate)
 
     # ── 去末尾季标，保留基础标题 ─────────────────────────
-    no_season = _re.sub(
-        r"[\s_]*(第[一二三四五六七八九十百\d]+[季期]|Season\s*\d+|S\d+)\s*$",
-        "", title,
-    ).strip()
-    if no_season and no_season != title and no_season not in variants:
-        variants.append(no_season)
+    for base_title in _bases:
+        no_season = _re.sub(
+            r"[\s_]*(第[一二三四五六七八九十百\d]+[季期]|Season\s*\d+|S\d+)\s*$",
+            "", base_title,
+        ).strip()
+        if no_season and no_season != base_title and no_season not in variants:
+            variants.append(no_season)
 
     # ── 第一个分隔符前的部分 ──────────────────────────────
-    for sep in (" ", "：", ":", "·", "・", "～", "~"):
-        idx = title.find(sep)
-        if idx >= 3:
-            part = title[:idx].strip()
-            if part not in variants:
-                variants.append(part)
-            break
+    for base_title in _bases:
+        for sep in (" ", "：", ":", "·", "・", "～", "~"):
+            idx = base_title.find(sep)
+            if idx >= 3:
+                part = base_title[:idx].strip()
+                if part not in variants:
+                    variants.append(part)
+                break
 
-    # ── 前6字兜底 ─────────────────────────────────────────
-    if len(title) > 8:
-        short = title[:6]
+    # ── 净化标题前6字兜底 ──────────────────────────────────
+    # 以 clean_title 为基础，避免截断后首字是引号
+    fallback_base = clean_title if clean_title else title
+    if len(fallback_base) > 8:
+        short = fallback_base[:6]
         if short not in variants:
             variants.append(short)
 
@@ -447,38 +501,206 @@ def _title_variants(title: str) -> list[str]:
 import requests as _requests
 
 
-def _bgm_canonical_names(title: str) -> list[str]:
+def _bgm_canonical_names(title: str) -> "tuple[int | None, list[str]]":
     """
-    用 bangumi.tv v0 API 搜索标题，返回官方名称列表（name_cn 优先，再 name）。
-    用于 mikanani 标题与 yuc.wiki 标题不一致时的最后兜底。
-    bgm 的搜索对别名、异体字容错极强，通常能找到准确匹配。
+    用 bangumi.tv v0 API 搜索标题，返回 (bgm_subject_id, [canonical_names])。
+
+    bgm_subject_id 是全局唯一的 subject ID，与蜜柑页面上的 bgm.tv/subject/XXXX
+    链接比对，是判断"蜜柑候选是否是正确番剧"的唯一可靠标准。
+
+    canonical_names 用于当 yuc.wiki 标题与蜜柑标题不一致时，通过 bgm 官方名称
+    重搜蜜柑（如「工坊」vs「工房」等异体字差异）。
+
+    只使用第一个搜索结果（最相关），不收集后续结果的名字。
     """
     try:
-        resp = _requests.post(
-            "https://api.bgm.tv/v0/search/subjects",
-            params={"limit": 5},
-            json={"keyword": title, "filter": {"type": [2]}},
-            headers={
-                "User-Agent": "anime-rss/1.0",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=6,
+        from urllib.parse import quote as _quote
+        _hdrs = {"User-Agent": "anime-rss/1.0", "Accept": "application/json"}
+
+        # 旧版 API：排序与网站一致，能正确区分多季
+        resp = _requests.get(
+            f"https://api.bgm.tv/search/subject/{_quote(title)}",
+            params={"type": 2, "responseGroup": "small", "max_results": 5},
+            headers=_hdrs, timeout=6,
         )
-        if not resp.ok:
-            return []
+        items = (resp.json().get("list") or []) if resp.ok else []
+
+        # 旧版无结果时回退 v0 API（对错别字/异体字更宽容）
+        if not items:
+            resp2 = _requests.post(
+                "https://api.bgm.tv/v0/search/subjects",
+                params={"limit": 5},
+                json={"keyword": title, "filter": {"type": [2]}},
+                headers={**_hdrs, "Content-Type": "application/json"},
+                timeout=6,
+            )
+            items = (resp2.json().get("data") or []) if resp2.ok else []
+        if not items:
+            return None, []
+        # 只取第一个结果（最相关），不收后续结果的名字，
+        # 避免误用 bgm 相关结果（如辉夜）的名字去蜜柑搜索
+        first = items[0]
+        first_bgm_id: int = first["id"]
         names: list[str] = []
-        for item in resp.json().get("data", [])[:3]:
-            cn = (item.get("name_cn") or "").strip()
-            jp = (item.get("name") or "").strip()
-            if cn and cn not in names:
-                names.append(cn)
-            if jp and jp not in names:
-                names.append(jp)
-        return names
+        cn = (first.get("name_cn") or "").strip()
+        jp = (first.get("name") or "").strip()
+        if cn:
+            names.append(cn)
+        if jp and jp != cn:
+            names.append(jp)
+        return first_bgm_id, names
     except Exception as e:
         logger.debug("bgm 搜索失败 [%s]: %s", title, e)
-        return []
+        return None, []
+
+
+# ── 季度索引（核心加速）─────────────────────────────────
+
+import re as _re_mod   # requests 已作为 _requests 导入
+
+_Q_TO_SEASON = {1: "冬", 2: "春", 3: "夏", 4: "秋"}
+_SEASON_INDEX_TTL = 7 * 24 * 3600  # 7 天，与番剧页缓存一致
+
+
+def quarter_to_season_params(quarter: str) -> "tuple[int, str]":
+    """'2026Q2' → (2026, '春')"""
+    year = int(quarter[:4])
+    q    = int(quarter[5])
+    return year, _Q_TO_SEASON[q]
+
+
+def build_season_index(
+    quarter: str,
+    use_mirror: bool = False,
+) -> "dict[int, int]":
+    """
+    预建 {bgm_id: bangumi_id} 索引，磁盘缓存 7 天。
+
+    流程：
+      1. 一次 HTTP 请求拿到蜜柑当季所有 bangumi_id
+      2. 并行 fetch 每个番剧页，提取 bgm.tv subject_id
+      3. 构建并缓存 {bgm_id: bangumi_id}
+
+    之后订阅只需 bgm_search → bgm_id → dict[bgm_id] → find_best_rss，
+    不再搜索蜜柑、不再逐个验证。
+    """
+    cache_key = f"season_index:{quarter}:{'mirror' if use_mirror else 'main'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info("季度索引缓存命中：%s (%d 条)", quarter, len(cached))
+        # cache 存的是 list of [bgm_id, bangumi_id]，还原为 dict
+        if isinstance(cached, list):
+            return {int(k): int(v) for k, v in cached}
+        return cached
+
+    year, season_str = quarter_to_season_params(quarter)
+    base = MIKAN_MIRROR if use_mirror else MIKAN_BASE
+
+    # Step 1: 获取季度页 bangumi_id 列表
+    logger.info("构建蜜柑季度索引：%d %s ...", year, season_str)
+    try:
+        resp = _requests.get(
+            f"{base}/Home/BangumiCoverFlowByDayOfWeek",
+            params={"year": year, "seasonStr": season_str},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": f"{base}/",
+                "Accept": "*/*",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("获取蜜柑季度页失败：%s", e)
+        return {}
+
+    html = resp.text
+    bangumi_ids = list(dict.fromkeys(
+        int(m) for m in _re_mod.findall(r"/Home/Bangumi/(\d+)", html)
+    ))
+    logger.info("季度页找到 %d 个 bangumi_id", len(bangumi_ids))
+
+    if not bangumi_ids:
+        return {}
+
+    # Step 2: 并行 fetch 所有番剧页，提取 bgm_id
+    # 用共享 requests.Session（连接池复用）+ 20 workers，比 scrapling 快 3-5x
+    from concurrent.futures import ThreadPoolExecutor
+    import requests as _req_lib
+
+    index: dict[int, int] = {}   # bgm_id → bangumi_id
+
+    _sess = _req_lib.Session()
+    _sess.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": f"{base}/",
+    })
+
+    title_index: dict[str, int] = {}   # 归一化标题 → bangumi_id（反查用）
+    from html import unescape as _unescape
+
+    def _fetch_bgm_id(bid: int) -> "tuple[int, int | None]":
+        ck = f"bangumi_data:{bid}:{'mirror' if use_mirror else 'main'}"
+        cached_b = _cache_get(ck)
+        if cached_b is not None and "bgm_id" in cached_b:
+            return bid, cached_b.get("bgm_id")
+        try:
+            r = _sess.get(f"{base}/Home/Bangumi/{bid}", timeout=10)
+            if r.ok:
+                m = _re_mod.search(r"bgm\.tv/subject/(\d+)", r.text)
+                return bid, int(m.group(1)) if m else None
+        except Exception as exc:
+            logger.debug("fetch bgm_id bangumi=%d 失败: %s", bid, exc)
+        return bid, None
+
+    def _fetch_title(bid: int) -> "tuple[int, str]":
+        """始终 fetch 页面提取标题（不走缓存，缓存里没有 title 字段）。"""
+        try:
+            r = _sess.get(f"{base}/Home/Bangumi/{bid}", timeout=10)
+            if r.ok:
+                m = (_re_mod.search(r'<title>\s*Mikan Project\s*-\s*([^<]+?)\s*</title>', r.text)
+                     or _re_mod.search(r'class="bangumi-title[^"]*"[^>]*>([^<]+?)<', r.text))
+                if m:
+                    return bid, _unescape(m.group(1).strip())
+        except Exception as exc:
+            logger.debug("fetch title bangumi=%d 失败: %s", bid, exc)
+        return bid, ""
+
+    # Step 2a: 并行提取 bgm_id（优先走磁盘缓存，快）
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        for bid, bgm_id in pool.map(_fetch_bgm_id, bangumi_ids):
+            if bgm_id is not None:
+                index[bgm_id] = bid
+
+    # Step 2b: 并行提取蜜柑标题（始终 fetch，用于标题反查）
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        for bid, mikan_title in pool.map(_fetch_title, bangumi_ids):
+            if mikan_title:
+                base_title = _re_mod.sub(
+                    r"[\s　]*第[一二三四五六七八九十百\d]+[季期]$", "", mikan_title
+                ).strip()
+                if base_title:
+                    title_index[base_title] = bid
+                title_index[mikan_title] = bid
+
+    _sess.close()
+    logger.info("索引构建完成：bgm=%d条 标题=%d条（共%d番）",
+                len(index), len(title_index), len(bangumi_ids))
+
+    # 缓存 bgm_id 索引 + 标题反查索引
+    _cache_set(cache_key, [[k, v] for k, v in index.items()])
+    _cache_set(cache_key + ":titles", [[k, v] for k, v in title_index.items()])
+    return index
+
+
+def load_season_title_index(quarter: str, use_mirror: bool = False) -> "dict[str, int]":
+    """返回 {归一化标题: bangumi_id}，由 build_season_index 构建时写入缓存。"""
+    cache_key = f"season_index:{quarter}:{'mirror' if use_mirror else 'main'}:titles"
+    cached = _cache_get(cache_key)
+    if cached is None:
+        return {}
+    return {str(k): int(v) for k, v in cached}
 
 
 # ── 辅助：获取某字幕组 RSS 最新一条的发布时间 ────────────
@@ -505,109 +727,151 @@ def _latest_rss_time(
 # ── 完整流程（搜索 + 选择最佳 RSS）──────────────────────
 
 
+def _pick_best_fallback(
+    title: str,
+    candidates: list[dict],
+    priorities: list[str],
+    weeks: int,
+    use_mirror: bool,
+) -> "dict | None":
+    """
+    search_override 时使用：从候选列表中选 RSS 最近更新的番剧（不做 bgm 验证）。
+    用于用户已明确知道搜索词时，对结果择优。
+    """
+    best_result: "dict | None" = None
+    best_time: "datetime | None" = None
+
+    for candidate in candidates:
+        best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
+        if best:
+            latest = _latest_rss_time(candidate["id"], best["subgroup_id"], use_mirror)
+            if best_result is None or (
+                latest is not None and (best_time is None or latest > best_time)
+            ):
+                best_result = {
+                    "title": title,
+                    "bangumi_id": candidate["id"],
+                    "bangumi_name": candidate["name"],
+                    **best,
+                }
+                best_time = latest
+
+    return best_result
+
+
 def resolve_anime_rss(
     title: str,
     priorities: list[str],
     weeks: int = 4,
     use_mirror: bool = False,
     search_override: str | None = None,
+    season_index: "dict[int, int] | None" = None,
+    quarter: str = "",
 ) -> dict | None:
     """
     一步完成：搜索番剧 → 找最佳 RSS。
 
-    search_override：用于手动指定蜜柑搜索词（跳过自动变体逻辑）。
+    两条路径：
 
-    选择策略：
-    - 精确命中（用原始标题搜到）：取前 3 候选，选第一个有资源的（快速）
-    - 模糊命中（用缩短/变体词搜到，或手动 override）：
-        遍历所有候选，优先字幕组优先级，但在多个候选均有资源时
-        选 RSS 最近更新时间最新的（避免误选老季度）
+    ① season_index 路径（有索引时）：
+       bgm 全名搜一次 → bgm_id → season_index[bgm_id] → find_best_rss
+       不做任何 mikanani 标题变体搜索。
+       未命中（bgm 返回非当季 ID）→ None，用户用 search_override 手动重试。
 
-    返回：
-    {
-      "title": str,
-      "bangumi_id": int,
-      "bangumi_name": str,
-      "subgroup_id": int,
-      "subgroup_name": str,
-      "rss_url": str,
-    }
-    或 None（未找到）。
+    ② 无索引路径（无索引或 search_override）：
+       search_override：直接用指定词搜蜜柑，跳过 bgm 验证。
+       无 override：bgm 全名搜一次 → bgm_id，mikanani 标题搜索 + bgm_id 验证。
     """
-    # 确定要尝试的搜索词列表
+    # ── search_override：用户手动指定搜索词，跳过 bgm 验证 ──
     if search_override:
-        search_terms = [search_override.strip()]
-    else:
-        search_terms = _title_variants(title)
+        cands = search_bangumi(search_override.strip(), use_mirror)
+        if not cands:
+            logger.warning("override 搜索词 '%s' 在蜜柑无结果", search_override)
+            return None
+        return _pick_best_fallback(title, cands, priorities, weeks, use_mirror)
 
-    # 逐个变体搜索，找到候选即停；记录是否用了非原始词（fallback）
-    candidates: list[dict] = []
-    is_fallback = bool(search_override)  # 手动 override 也走 fallback 策略
-    for i, term in enumerate(search_terms):
-        candidates = search_bangumi(term, use_mirror)
-        if candidates:
-            if not search_override:
-                is_fallback = (i > 0)
-            logger.info("搜索词 '%s' 命中 %d 个候选 (fallback=%s)", term, len(candidates), is_fallback)
-            break
-        logger.info("搜索词 '%s' 无结果，尝试下一变体", term)
+    # ── bgm 搜索（一次，全名，不做变形）────────────────────
+    target_bgm_id, bgm_fallback_names = _bgm_canonical_names(title)
+    logger.info("bgm_id=%s  候选名=%s", target_bgm_id, bgm_fallback_names)
 
-    if not candidates and not search_override:
-        # ── bgm.tv 回退：用官方名称重新搜索 ─────────────────
-        logger.info("本地变体均无结果，尝试 bgm.tv 搜索：%s", title)
-        bgm_names = _bgm_canonical_names(title)
-        for bgm_name in bgm_names:
-            if bgm_name in search_terms:
-                continue          # 已经试过
-            candidates = search_bangumi(bgm_name, use_mirror)
-            if candidates:
-                is_fallback = True
-                logger.info("bgm 名称 '%s' 命中 %d 个候选", bgm_name, len(candidates))
-                break
-            logger.info("bgm 名称 '%s' 仍无结果", bgm_name)
+    # ── ① season_index 路径：直接查表，不搜蜜柑标题 ─────────
+    if season_index is not None:
+        # bgm_id 查表
+        bangumi_id = season_index.get(target_bgm_id) if target_bgm_id else None
 
-    if not candidates:
-        logger.warning("未在蜜柑计划找到：%s（尝试词：%s）", title, search_terms)
+        # 未命中（bgm 返回老季 ID / bgm 找不到）→ 标题反查
+        if not bangumi_id and quarter:
+            title_idx = load_season_title_index(quarter, use_mirror)
+            # 剥掉「第X期 Part.1」等整个季号+附加信息
+            base_title = _re_mod.sub(
+                r"[\s　]*第[一二三四五六七八九十百\d]+[季期].*$", "", title
+            ).strip()
+            bangumi_id = title_idx.get(title) or title_idx.get(base_title)
+            if bangumi_id:
+                logger.info("标题反查命中：'%s'(base=%r) → mikan_id=%d",
+                            title, base_title, bangumi_id)
+            else:
+                logger.warning("'%s' bgm_id=%s 不在索引且无标题命中 → None",
+                               title, target_bgm_id)
+
+        if bangumi_id:
+            best = find_best_rss(bangumi_id, priorities, weeks, use_mirror)
+            if best:
+                return {"title": title, "bangumi_id": bangumi_id,
+                        "bangumi_name": title, **best}
+            logger.warning("mikan_id=%d 无可用 RSS", bangumi_id)
         return None
 
-    if not is_fallback:
-        # ── 精确命中：取前3，选第一个有资源的 ─────────────
-        for candidate in candidates[:3]:
-            best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
-            if best:
-                return {
-                    "title": title,
-                    "bangumi_id": candidate["id"],
-                    "bangumi_name": candidate["name"],
-                    **best,
-                }
-            time.sleep(0.5)
-    else:
-        # ── 模糊命中：遍历所有候选，选最近更新的有效资源 ──
-        # 用于「石纪元」等搜到多个季度的情形，确保选到当前连载季
-        logger.info("模糊匹配，对 %d 个候选按更新时间择优...", len(candidates))
-        best_result: dict | None = None
-        best_time: "datetime | None" = None
+    # season_index 不存在时才检查 bgm 结果
+    if target_bgm_id is None:
+        logger.warning("bgm.tv 未找到 '%s' → None", title)
+        return None
 
-        for candidate in candidates:
-            best = find_best_rss(candidate["id"], priorities, weeks, use_mirror)
-            if best:
-                latest = _latest_rss_time(candidate["id"], best["subgroup_id"], use_mirror)
-                if best_result is None or (
-                    latest is not None
-                    and (best_time is None or latest > best_time)
-                ):
-                    best_result = {
-                        "title": title,
-                        "bangumi_id": candidate["id"],
-                        "bangumi_name": candidate["name"],
-                        **best,
-                    }
-                    best_time = latest
-            time.sleep(0.3)
+    # ── ② 无索引路径：mikanani 标题搜索 + bgm_id 验证 ────────
+    search_terms = _title_variants(title)
 
-        if best_result:
-            return best_result
+    def _find_bgm_match(cands: list[dict]) -> "dict | None":
+        for c in cands:
+            data = _fetch_bangumi_data(c["id"], use_mirror)
+            mikan_bgm = data.get("bgm_id")
+            logger.info("  mikan_id=%d mikan_bgm=%s target=%s",
+                        c["id"], mikan_bgm, target_bgm_id)
+            if mikan_bgm == target_bgm_id:
+                return c
+        return None
 
-    logger.warning("'%s' 的所有候选番剧均无合适资源", title)
-    return None
+    matched: "dict | None" = None
+
+    # 并行跑 bgm（已完成）+第一词蜜柑搜索
+    first_cands = search_bangumi(search_terms[0], use_mirror)
+    if first_cands:
+        matched = _find_bgm_match(first_cands)
+
+    if matched is None:
+        for term in search_terms[1:]:
+            cands = search_bangumi(term, use_mirror)
+            if cands:
+                matched = _find_bgm_match(cands)
+                if matched:
+                    break
+
+    # bgm 官方名称重搜（异体字兜底，如工坊→工房）
+    if matched is None:
+        for bgm_name in bgm_fallback_names:
+            if bgm_name in search_terms:
+                continue
+            cands = search_bangumi(bgm_name, use_mirror)
+            if cands:
+                matched = _find_bgm_match(cands)
+                if matched:
+                    break
+
+    if matched is None:
+        logger.warning("bgm_id=%d 蜜柑无匹配：'%s' → None", target_bgm_id, title)
+        return None
+
+    best = find_best_rss(matched["id"], priorities, weeks, use_mirror)
+    if not best:
+        return None
+    return {"title": title, "bangumi_id": matched["id"],
+            "bangumi_name": matched["name"], **best}

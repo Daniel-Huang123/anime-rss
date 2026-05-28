@@ -103,6 +103,55 @@ class QBTClient:
             logger.error("添加 RSS 失败 [%s]: %s", path, e)
             return False, f"添加失败：{e}"
 
+    def unsubscribe(
+        self,
+        feed_path: str,
+        save_path: str = "",
+        delete_files: bool = True,
+    ) -> tuple[bool, str]:
+        """
+        完整取消订阅：
+          1. 删除 RSS feed
+          2. 删除对应下载规则（rule_name == feed_path）
+          3. 删除 save_path 下的所有种子（可选）
+        """
+        try:
+            with self._client() as c:
+                # 1. RSS feed
+                try:
+                    c.rss.remove_item(item_path=feed_path)
+                except Exception:
+                    pass  # 可能已不存在
+
+                # 2. 下载规则
+                try:
+                    c.rss.remove_rule(rule_name=feed_path)
+                except Exception:
+                    pass
+
+                # 3. 种子（按保存路径匹配）
+                deleted = 0
+                if save_path:
+                    sp_lower = save_path.replace("\\", "/").lower()
+                    all_t = c.torrents.info()
+                    hashes = [
+                        t.hash for t in all_t
+                        if t.save_path
+                        and t.save_path.replace("\\", "/").lower().startswith(sp_lower)
+                    ]
+                    if hashes:
+                        c.torrents.delete(torrent_hashes=hashes, delete_files=delete_files)
+                        deleted = len(hashes)
+
+            msg = f"✓ 已取消订阅：{feed_path}"
+            if deleted:
+                msg += f"，删除 {deleted} 个种子"
+            logger.info(msg)
+            return True, msg
+        except Exception as e:
+            logger.error("取消订阅失败 [%s]: %s", feed_path, e)
+            return False, f"取消订阅失败：{e}"
+
     def remove_rss_feed(self, path: str) -> tuple[bool, str]:
         """删除 RSS 订阅，path 同 add_rss_feed。"""
         try:
