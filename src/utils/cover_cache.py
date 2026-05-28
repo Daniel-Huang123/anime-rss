@@ -14,10 +14,11 @@ import logging
 from pathlib import Path
 
 import requests
+from src.utils.runtime_paths import ASSETS_COVERS_DIR
 
 logger = logging.getLogger(__name__)
 
-COVERS_DIR = Path(__file__).parent.parent.parent / "assets" / "covers"
+COVERS_DIR = ASSETS_COVERS_DIR
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 
 HEADERS = {

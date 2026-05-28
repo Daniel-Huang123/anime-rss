@@ -6,8 +6,10 @@
 import streamlit as st
 
 from src.utils.config import load_config
-from src.utils.season import current_quarter, list_season_options
-from src.utils.state import get_all_subscriptions_flat, get_cleanup_log, get_quarters_to_cleanup
+from src.utils.runtime_paths import COVER_CACHE_DIR
+from src.utils.season import current_quarter
+from src.utils.state import get_all_subscriptions_flat, get_quarters_to_cleanup
+from src.utils.ui_refresh import apply_auto_refresh
 
 st.set_page_config(
     page_title="番剧订阅管理",
@@ -25,6 +27,9 @@ try:
 except FileNotFoundError:
     st.error("⚠️ 找不到 config.yaml，请前往「设置」页面创建配置。")
     config_ok = False
+    cfg = {}
+
+apply_auto_refresh(cfg, "dashboard")
 
 # ── 概览卡片 ──────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)
@@ -79,7 +84,7 @@ from urllib.parse import quote as _quote
 from src.utils.file_parser import scan_media_directory
 from src.utils.state import get_all_subscriptions_flat as _get_subs
 
-_COVER_CACHE = Path(__file__).parent / ".cover_cache"
+_COVER_CACHE = COVER_CACHE_DIR
 
 def _dash_cover(folder) -> "bytes | None":
     """优先从 .cover_cache 取封面（与订阅页一致）。"""

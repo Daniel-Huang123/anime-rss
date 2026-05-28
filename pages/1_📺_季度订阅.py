@@ -20,8 +20,10 @@ from src.scrapers.mikanani import build_season_index, build_yuc_bgm_map, detect_
 from src.scrapers.yuc_wiki import clear_cache, get_season_list
 from src.utils.config import load_config
 from src.utils.cover_cache import get_or_fetch_cover
+from src.utils.runtime_paths import COVER_CACHE_DIR
 from src.utils.season import list_season_options, quarter_to_ym
 from src.utils.state import add_subscription, get_subscriptions, remove_subscription
+from src.utils.ui_refresh import apply_auto_refresh
 
 st.set_page_config(page_title="季度订阅", page_icon="📺", layout="wide")
 
@@ -56,6 +58,8 @@ except FileNotFoundError:
     st.error("请先在「设置」页面完成配置。")
     st.stop()
 
+apply_auto_refresh(cfg, "season_subscribe")
+
 priorities = cfg.get("subtitle_priorities", ["ANi", "kirara"])
 weeks      = cfg.get("resource_check", {}).get("recent_weeks", 4)
 use_mirror = cfg.get("advanced", {}).get("use_mirror", False)
@@ -68,9 +72,8 @@ qbt = QBTClient(
 
 # ── 封面磁盘缓存（只缓存成功结果，失败不写盘，下次重试）──
 import hashlib as _hashlib
-from pathlib import Path as _Path
 
-_COVER_CACHE_DIR = _Path(__file__).parent.parent / ".cover_cache"
+_COVER_CACHE_DIR = COVER_CACHE_DIR
 _COVER_CACHE_DIR.mkdir(exist_ok=True)
 
 
