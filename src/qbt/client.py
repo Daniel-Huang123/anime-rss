@@ -64,13 +64,17 @@ class QBTClient:
         url: str,
         path: str,
         save_path: str = "",
+        must_contain: str = "",
+        must_not_contain: str = "",
+        smart_filter: bool = True,
     ) -> tuple[bool, str]:
         """
         添加 RSS 订阅并同步创建自动下载规则。
 
         path 格式：'2026Q1/进击的巨人'
-        save_path：种子保存目录（如 'D:/Anime/2026Q1/进击的巨人'）；
-                   为空时 qBittorrent 使用默认保存路径。
+        save_path：种子保存目录；为空时 qBittorrent 使用默认路径。
+        must_contain / must_not_contain：集数去重过滤（如 must_contain="CHS" 只下简体）。
+        smart_filter：开启后 qBittorrent 自动跳过已下载集数，防同集重复下载。
         返回 (成功, 消息)。
         """
         try:
@@ -84,11 +88,11 @@ class QBTClient:
                 # 2. 创建/更新自动下载规则（规则名与 path 相同）
                 rule_def: dict = {
                     "enabled": True,
-                    "mustContain": "",
-                    "mustNotContain": "",
+                    "mustContain": must_contain,
+                    "mustNotContain": must_not_contain,
                     "useRegex": False,
                     "episodeFilter": "",
-                    "smartFilter": False,
+                    "smartFilter": smart_filter,
                     "addPaused": False,
                     "assignedCategory": "",
                     "affectedFeeds": [url],

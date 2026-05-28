@@ -875,3 +875,66 @@ def resolve_anime_rss(
         return None
     return {"title": title, "bangumi_id": matched["id"],
             "bangumi_name": matched["name"], **best}
+
+
+# ── RSS 集数去重过滤检测 ──────────────────────────────────
+
+import re as _re2
+
+# 简体中文相关标签（ANi/字幕组常用命名）
+_CHS_PATTERN = _re2.compile(
+    r'\bCHS\b'          # [CHS] 简体
+    r'|CHS&CHT'         # [CHS&CHT] 双语
+    r'|简体|GB(?!\d)'   # 中文"简体"或 GB 编码标记
+    r'|\[简\]',
+    _re2.IGNORECASE,
+)
+
+# 来源标签
+_SOURCE_PATTERN = _re2.compile(
+    r'\b(?P<src>CR|Crunchyroll|Baha|Bahamut|Abema|B-Global|Bilibili)\b',
+    _re2.IGNORECASE,
+)
+
+
+def detect_rss_filter(rss_url: str) -> dict:
+    """
+    扫描 RSS 前 10 条条目，检测最优的去重过滤规则。
+
+    策略：
+      1. 有简体内嵌（CHS / CHS&CHT）→ mustContain="CHS"，只下简体版本
+      2. 多来源（CR + Baha / Abema）→ smartFilter=True 防集数重复下载
+      3. 单来源 → mustContain="" smartFilter=True
+
+    返回 dict 供 QBTClient.add_rss_feed 直接使用。
+    """
+    try:
+        feed = feedparser.parse(rss_url)
+        titles = [e.get("title", "") for e in feed.entries[:10]]
+    except Exception:
+        titles = []
+
+    if not titles:
+        return {"mustContain": "", "mustNotContain": "", "smartFilter": True}
+
+    has_chs = any(_CHS_PATTERN.search(t) for t in titles)
+    if has_chs:
+        logger.info("RSS 检测到简体内嵌，设置 mustContain=CHS")
+        return {"mustContain": "CHS", "mustNotContain": "", "smartFilter": True}
+
+    # 检测来源多样性
+    sources: set[str] = set()
+    for t in titles:
+        m = _SOURCE_PATTERN.search(t)
+        if m:
+            src = m.group("src").upper()
+            src = "CR" if src in ("CR", "CRUNCHYROLL") else src
+            src = "Baha" if src in ("BAHA", "BAHAMUT") else src
+            sources.add(src)
+
+    if len(sources) > 1:
+        # 多来源：smartFilter 防止同集重复，不再指定 mustContain
+        # （qBittorrent 先到先得，已下载的集数自动跳过）
+        logger.info("RSS 检测到多来源 %s，启用 smartFilter", sources)
+
+    return {"mustContain": "", "mustNotContain": "", "smartFilter": True}

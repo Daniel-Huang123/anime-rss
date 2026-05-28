@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 
 from src.qbt.client import QBTClient
-from src.scrapers.mikanani import build_season_index, resolve_anime_rss
+from src.scrapers.mikanani import build_season_index, detect_rss_filter, resolve_anime_rss
 from src.scrapers.yuc_wiki import clear_cache, get_season_list
 from src.utils.config import load_config
 from src.utils.cover_cache import get_or_fetch_cover
@@ -359,10 +359,12 @@ for day in ordered_days:
                             f"{qbt_save_path}/{loaded_quarter}/{title}"
                             if qbt_save_path else ""
                         )
+                        _rss_filter = detect_rss_filter(result["rss_url"])
                         ok, qbt_msg = qbt.add_rss_feed(
                             url=result["rss_url"],
                             path=f"{loaded_quarter}/{title}",
                             save_path=_dl_path,
+                            **_rss_filter,
                         )
                         if ok:
                             get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
@@ -401,10 +403,12 @@ for day in ordered_days:
                             f"{qbt_save_path}/{loaded_quarter}/{title}"
                             if qbt_save_path else ""
                         )
+                        _rss_filter = detect_rss_filter(result["rss_url"])
                         ok, qbt_msg = qbt.add_rss_feed(
                             url=result["rss_url"],
                             path=f"{loaded_quarter}/{title}",
                             save_path=_dl_path,
+                            **_rss_filter,
                         )
                         if ok:
                             get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
