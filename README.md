@@ -93,18 +93,14 @@ uv run streamlit run app.py
 
 ### PotPlayer 集成（推荐）
 
-媒体库通过 PotPlayer 的"播放历史"文件追踪观看进度，**推荐使用 PotPlayer**。
+媒体库通过本地 `watch_history.json`、PotPlayer 播放列表历史和 Windows Recent Files 合并追踪观看进度，**推荐使用 PotPlayer**。
 
 **配置步骤**：
 
 1. 下载安装 [PotPlayer](https://potplayer.daum.net/)（64位）
 2. 在 PotPlayer 中：**选项 → 播放 → 播放列表 → 保存最近播放记录** 勾选
-3. PotPlayer 默认将播放记录写入 `%APPDATA%\PotPlayer\PotPlayerMini64.ini`，本应用自动读取此路径
-4. 若使用便携版，在 `config.yaml` 中指定：
-   ```yaml
-   media:
-     potplayer_history: "D:/PotPlayer/PotPlayerMini64.ini"
-   ```
+3. 本应用会自动读取 PotPlayer 标准播放列表历史：`%APPDATA%\PotPlayerMini64\Playlist\PotPlayerMini64.dpl`
+4. 如果从媒体库页面点击剧集播放，应用会同步写入项目根目录的 `watch_history.json`
 
 播放记录中包含文件路径和最后播放时间，媒体库据此显示：
 - 橙色进度条：观看进行中
@@ -113,9 +109,12 @@ uv run streamlit run app.py
 
 ### 播放脚本（可选）
 
-项目根目录附带 `potplayer_tracker.as`（AutoHotScript），可实现：
-- 结束播放时自动刷新媒体库进度
-- 可选：自动标记已完成集数
+项目根目录附带 `potplayer_tracker.as`（AngelScript 模板），可实现显式播放日志：
+- 先把 `MEDIA_ROOT` 改成 `config.yaml` 里的 `qbittorrent.save_path`
+- 再把 `LOG_FILE` 改成项目根目录下的 `potplayer_plays.txt`
+- 放入 PotPlayer 的 AngelScript 扩展目录并启用
+
+`watch_history.json` 和 `potplayer_plays.txt` 是本地运行数据，已加入 `.gitignore`，不会进入仓库。
 
 ---
 

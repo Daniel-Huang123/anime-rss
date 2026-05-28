@@ -19,6 +19,15 @@ import qbittorrentapi
 logger = logging.getLogger(__name__)
 
 
+def _is_same_or_child_path(path: str, parent: str) -> bool:
+    """Case-insensitive path containment check with segment boundary."""
+    if not path or not parent:
+        return False
+    p = path.replace("\\", "/").rstrip("/").lower()
+    root = parent.replace("\\", "/").rstrip("/").lower()
+    return p == root or p.startswith(root + "/")
+
+
 class QBTClient:
     def __init__(self, host: str, port: int, username: str, password: str) -> None:
         self._host = host
@@ -142,9 +151,8 @@ class QBTClient:
                     hashes.add(t.hash)
 
                 if save_path:
-                    sp_lower = save_path.replace("\\", "/").lower()
                     for t in c.torrents.info():
-                        if t.save_path and t.save_path.replace("\\", "/").lower().startswith(sp_lower):
+                        if _is_same_or_child_path(t.save_path, save_path):
                             hashes.add(t.hash)
 
                 deleted = 0

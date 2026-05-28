@@ -18,6 +18,7 @@ except FileNotFoundError:
     st.stop()
 
 qbt_cfg = cfg["qbittorrent"]
+qbt_save_path = qbt_cfg.get("save_path", "").strip().strip('"').strip("'")
 qbt = QBTClient(
     host=qbt_cfg["host"],
     port=qbt_cfg["port"],
@@ -61,16 +62,17 @@ with col2:
     quarter_titles = [s["title"] for s in all_subs if s["quarter"] == del_quarter]
     del_title = st.selectbox("番剧", quarter_titles if quarter_titles else ["（无）"], key="del_t")
 
-del_also_qbt = st.checkbox("同时从 qBittorrent 删除 RSS feed", value=True)
+del_also_qbt = st.checkbox("同时删除 qBittorrent RSS、种子和本地目录", value=True)
 
 if st.button("🗑️ 删除", type="secondary", disabled=del_title == "（无）"):
     if del_also_qbt:
         feed_path = f"{del_quarter}/{del_title}"
-        ok, msg = qbt.remove_rss_feed(feed_path)
+        save_path = f"{qbt_save_path}/{del_quarter}/{del_title}" if qbt_save_path else ""
+        ok, msg = qbt.unsubscribe(feed_path=feed_path, save_path=save_path)
         if ok:
-            st.success(f"qBit RSS 已删除：{feed_path}")
+            st.success(msg)
         else:
-            st.warning(f"qBit RSS 删除失败（可能已不存在）：{msg}")
+            st.warning(f"qBittorrent 删除失败（可能已部分不存在）：{msg}")
 
     removed = remove_subscription(del_quarter, del_title)
     if removed:

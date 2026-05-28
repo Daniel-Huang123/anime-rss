@@ -122,6 +122,8 @@ def _parse_html_raw(html_content: str) -> list[dict]:
             # pending：在 div_date 内收集，属于"即将到来"的番剧
             self._pending_cover: str = ""
             self._pending_broadcast_time: str = ""
+            self._pending_ep: str = ""
+            self._pending_status: str = ""
 
             # current：属于"正在处理"的番剧（date_title 触发后填入）
             self._current_title = ""
@@ -154,14 +156,16 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 self._in_date_title = True
                 self._title_done = False
                 self._current_title = ""
-                self._current_ep = ""
-                self._current_status = "连载中"
                 self._current_platforms = []
                 # 转移 pending → current
                 self._current_cover = self._pending_cover
                 self._current_broadcast_time = self._pending_broadcast_time
+                self._current_ep = self._pending_ep
+                self._current_status = self._pending_status or "连载中"
                 self._pending_cover = ""
                 self._pending_broadcast_time = ""
+                self._pending_ep = ""
+                self._pending_status = ""
 
             elif tag == "br" and self._in_date_title and not self._title_done:
                 # 暂不立即截断：等下一个文字片段判断是"集数"还是标题续行
@@ -231,13 +235,13 @@ def _parse_html_raw(html_content: str) -> list[dict]:
                 # 续行加空格（避免"动物狂想曲最终章"这样粘连）
                 self._current_title += (" " if self._current_title else "") + text
             elif self._in_imgep:
-                self._current_ep = text
+                self._pending_ep = text
             elif self._in_imgtext4:
                 # imgtext4 在 div_date 内，此时尚未进入 date_title，存入 pending
                 self._pending_broadcast_time = text
             elif self._in_imgtext2:
                 if "完结" in text:
-                    self._current_status = "完结"
+                    self._pending_status = "完结"
             elif self._in_platform_link:
                 self._current_platforms.append(text)
 

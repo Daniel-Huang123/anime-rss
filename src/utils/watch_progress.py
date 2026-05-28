@@ -285,5 +285,7 @@ def next_unwatched_episode(
         if f in watched:
             last_idx = i
 
-    # 返回最后一次打开的那集（可能还没看完），不跳到下一集
-    return episode_files[last_idx]
+    next_idx = last_idx + 1
+    if next_idx < len(episode_files):
+        return episode_files[next_idx]
+    return episode_files[last_idx] if last_idx >= 0 else None

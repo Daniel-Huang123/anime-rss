@@ -5,6 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.uv-cache/
 
 # Virtual environments
 .venv/
@@ -16,6 +18,8 @@ config.yaml
 assets/covers/
 .mikan_cache.json
 .cover_cache/
+watch_history.json
+potplayer_plays.txt
 plan.md
 
 # Streamlit

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import html
 from collections import defaultdict
 
 import requests
@@ -311,6 +312,7 @@ for day in ordered_days:
 
             # 标题（≤16字，超出截断）
             disp = title[:15] + "…" if len(title) > 15 else title
+            disp = html.escape(disp)
             st.markdown(
                 f'<p style="font-size:0.8em;font-weight:600;margin:4px 0 2px;'
                 f'line-height:1.3;min-height:2.4em;word-break:break-all;">'

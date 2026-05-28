@@ -72,6 +72,7 @@ st.subheader("🎬 媒体库")
 
 import base64 as _b64
 import hashlib as _hashlib
+import html as _html
 from pathlib import Path
 from urllib.parse import quote as _quote
 
@@ -95,6 +96,7 @@ def _dash_cover(folder) -> "bytes | None":
     return cp.read_bytes() if cp and cp.exists() else None
 
 def _dash_card(img_bytes: "bytes | None", title: str, ep_label: str, href: str) -> str:
+    href = _html.escape(href, quote=True)
     content = (
         f'<img src="data:image/jpeg;base64,{_b64.b64encode(img_bytes).decode()}" '
         f'style="width:100%;height:100%;object-fit:cover;display:block;">'
@@ -112,7 +114,9 @@ def _dash_card(img_bytes: "bytes | None", title: str, ep_label: str, href: str) 
         '查看</div>'
     )
     link = f'<a href="{href}" target="_self" style="position:absolute;inset:0;"></a>'
-    disp = (title[:9] + "…") if len(title) > 9 else title
+    disp_raw = (title[:9] + "…") if len(title) > 9 else title
+    disp = _html.escape(disp_raw)
+    ep_label = _html.escape(ep_label)
     return (
         f'<div style="position:relative;width:100%;border-radius:8px;overflow:hidden;'
         f'background:#1e1e2e;aspect-ratio:5/7;">{content}{hover}{link}</div>'

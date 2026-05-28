@@ -32,3 +32,7 @@ jobs:
       - name: Ruff lint
         run: |
           uv run ruff check src pages app.py --select E,F,W --ignore E501,E402,F401
+
+      - name: Pytest
+        run: |
+          uv run pytest tests/ -v
