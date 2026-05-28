@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
 
 import qbittorrentapi
@@ -94,7 +96,7 @@ class QBTClient:
                     "episodeFilter": "",
                     "smartFilter": smart_filter,
                     "addPaused": False,
-                    "assignedCategory": "",
+                    "assignedCategory": path,
                     "affectedFeeds": [url],
                 }
                 if save_path:
@@ -133,23 +135,45 @@ class QBTClient:
                 except Exception:
                     pass
 
-                # 3. 种子（按保存路径匹配）
-                deleted = 0
+                # 3. 种子：按 category 匹配（add_rss_feed 写入）+ save_path 兜底
+                hashes: set[str] = set()
+
+                for t in c.torrents.info(category=feed_path):
+                    hashes.add(t.hash)
+
                 if save_path:
                     sp_lower = save_path.replace("\\", "/").lower()
-                    all_t = c.torrents.info()
-                    hashes = [
-                        t.hash for t in all_t
-                        if t.save_path
-                        and t.save_path.replace("\\", "/").lower().startswith(sp_lower)
-                    ]
-                    if hashes:
-                        c.torrents.delete(torrent_hashes=hashes, delete_files=delete_files)
-                        deleted = len(hashes)
+                    for t in c.torrents.info():
+                        if t.save_path and t.save_path.replace("\\", "/").lower().startswith(sp_lower):
+                            hashes.add(t.hash)
+
+                deleted = 0
+                if hashes:
+                    # 有 save_path 时让 qBittorrent 只移除任务（释放文件句柄），
+                    # 由 Python 负责删目录；没有 save_path 时才让 qBittorrent 删文件。
+                    c.torrents.delete(
+                        torrent_hashes=list(hashes),
+                        delete_files=(delete_files and not save_path),
+                    )
+                    deleted = len(hashes)
+
+            # 4. 删除本地目录（qBittorrent 已释放句柄，Python 直接 rmtree）
+            dir_removed = False
+            if save_path and delete_files:
+                sp = Path(save_path)
+                if sp.exists():
+                    try:
+                        shutil.rmtree(sp)
+                        dir_removed = True
+                        logger.info("已删除目录：%s", sp)
+                    except Exception as rm_err:
+                        logger.warning("目录删除失败（可能有文件被占用）：%s — %s", sp, rm_err)
 
             msg = f"✓ 已取消订阅：{feed_path}"
             if deleted:
                 msg += f"，删除 {deleted} 个种子"
+            if dir_removed:
+                msg += "，已清空本地目录"
             logger.info(msg)
             return True, msg
         except Exception as e:

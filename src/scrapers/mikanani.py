@@ -501,17 +501,15 @@ def _title_variants(title: str) -> list[str]:
 import requests as _requests
 
 
-def _bgm_canonical_names(title: str) -> "tuple[int | None, list[str]]":
+def _bgm_canonical_names(title: str) -> "tuple[list[int], list[str]]":
     """
-    用 bangumi.tv v0 API 搜索标题，返回 (bgm_subject_id, [canonical_names])。
+    用 bangumi.tv v0 API 搜索标题，返回 (bgm_id_list, [canonical_names])。
 
-    bgm_subject_id 是全局唯一的 subject ID，与蜜柑页面上的 bgm.tv/subject/XXXX
-    链接比对，是判断"蜜柑候选是否是正确番剧"的唯一可靠标准。
+    bgm_id_list：按搜索结果顺序，最多 5 个 subject ID。
+      用于在 season_index 中逐一匹配蜜柑当季番剧，解决同名多季时第一个 ID
+      可能是旧季（如咒术回战第三期搜出「死灭回游」arc 对应的旧 ID）的问题。
 
-    canonical_names 用于当 yuc.wiki 标题与蜜柑标题不一致时，通过 bgm 官方名称
-    重搜蜜柑（如「工坊」vs「工房」等异体字差异）。
-
-    只使用第一个搜索结果（最相关），不收集后续结果的名字。
+    canonical_names：仅取第一个结果的中/日文名，供异体字兜底搜蜜柑用。
     """
     try:
         from urllib.parse import quote as _quote
@@ -520,7 +518,7 @@ def _bgm_canonical_names(title: str) -> "tuple[int | None, list[str]]":
         # 旧版 API：排序与网站一致，能正确区分多季
         resp = _requests.get(
             f"https://api.bgm.tv/search/subject/{_quote(title)}",
-            params={"type": 2, "responseGroup": "small", "max_results": 5},
+            params={"type": 2, "responseGroup": "small", "max_results": 10},
             headers=_hdrs, timeout=6,
         )
         items = (resp.json().get("list") or []) if resp.ok else []
@@ -529,18 +527,20 @@ def _bgm_canonical_names(title: str) -> "tuple[int | None, list[str]]":
         if not items:
             resp2 = _requests.post(
                 "https://api.bgm.tv/v0/search/subjects",
-                params={"limit": 5},
+                params={"limit": 10},
                 json={"keyword": title, "filter": {"type": [2]}},
                 headers={**_hdrs, "Content-Type": "application/json"},
                 timeout=6,
             )
             items = (resp2.json().get("data") or []) if resp2.ok else []
         if not items:
-            return None, []
-        # 只取第一个结果（最相关），不收后续结果的名字，
-        # 避免误用 bgm 相关结果（如辉夜）的名字去蜜柑搜索
+            return [], []
+
+        # 收集最多 10 个有效 ID（先过滤无 id 条目，再截取前10）
+        bgm_ids: list[int] = [item["id"] for item in items if item.get("id")][:10]
+
+        # 只用第一个结果的名字做异体字兜底搜蜜柑，避免误用无关作品名
         first = items[0]
-        first_bgm_id: int = first["id"]
         names: list[str] = []
         cn = (first.get("name_cn") or "").strip()
         jp = (first.get("name") or "").strip()
@@ -548,10 +548,10 @@ def _bgm_canonical_names(title: str) -> "tuple[int | None, list[str]]":
             names.append(cn)
         if jp and jp != cn:
             names.append(jp)
-        return first_bgm_id, names
+        return bgm_ids, names
     except Exception as e:
         logger.debug("bgm 搜索失败 [%s]: %s", title, e)
-        return None, []
+        return [], []
 
 
 # ── 季度索引（核心加速）─────────────────────────────────
@@ -703,6 +703,72 @@ def load_season_title_index(quarter: str, use_mirror: bool = False) -> "dict[str
     return {str(k): int(v) for k, v in cached}
 
 
+def build_yuc_bgm_map(
+    titles: "list[str]",
+    season_index: "dict[int, int]",
+    quarter: str,
+    use_mirror: bool = False,
+) -> "dict[str, int]":
+    """
+    为 yuc.wiki 番单标题建立 {title: bgm_id} 映射，缓存 7 天。
+
+    第一步：title_index 直接/归一化匹配（无网络请求）。
+    第二步：未命中的标题并行调 BGM API，用返回的 bgm_id_list 与
+            season_index 比对，逻辑与订阅时的第二种匹配完全相同。
+
+    season_index 在首次加载时已拿到当季全部 {bgm_id: bangumi_id}，
+    所以只要 BGM API 返回的前 5 个 ID 里有当季条目，就能命中。
+    """
+    cache_key = f"yuc_bgm_map:{quarter}:{'mirror' if use_mirror else 'main'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {str(k): int(v) for k, v in cached}
+
+    title_idx = load_season_title_index(quarter, use_mirror)
+
+    # 归一化辅助
+    def _norm(t: str) -> str:
+        s = _re_mod.sub(
+            r"[\s　]*(第[一二三四五六七八九十百\d]+[季期].*|Season\s*\d+.*|S\d+.*)$",
+            "", t, flags=_re_mod.IGNORECASE,
+        )
+        return s.strip().replace(" ", "").replace("　", "")
+
+    norm_title_idx: "dict[str, int]" = {_norm(k): v for k, v in title_idx.items()}
+    result: "dict[str, int]" = {}
+    unmatched: "list[str]" = []
+
+    for title in titles:
+        bid = title_idx.get(title) or norm_title_idx.get(_norm(title))
+        if bid and bid in {v for v in season_index.values()}:
+            # bangumi_id → bgm_id（从 season_index 反查）
+            bgm_id = next((k for k, v in season_index.items() if v == bid), None)
+            if bgm_id:
+                result[title] = bgm_id
+                continue
+        unmatched.append(title)
+
+    # 第二步：BGM API 搜索（并行，5 workers）
+    if unmatched:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        def _match(title: str) -> "tuple[str, int | None]":
+            bgm_ids, _ = _bgm_canonical_names(title)
+            for bgm_id in bgm_ids:
+                if bgm_id in season_index:
+                    return title, bgm_id
+            return title, None
+
+        with _TPE(max_workers=5) as pool:
+            for title, bgm_id in pool.map(_match, unmatched):
+                if bgm_id:
+                    result[title] = bgm_id
+
+    _cache_set(cache_key, [[k, v] for k, v in result.items()])
+    logger.info("yuc→bgm 映射构建完成：%d/%d 命中", len(result), len(titles))
+    return result
+
+
 # ── 辅助：获取某字幕组 RSS 最新一条的发布时间 ────────────
 
 
@@ -791,13 +857,21 @@ def resolve_anime_rss(
         return _pick_best_fallback(title, cands, priorities, weeks, use_mirror)
 
     # ── bgm 搜索（一次，全名，不做变形）────────────────────
-    target_bgm_id, bgm_fallback_names = _bgm_canonical_names(title)
-    logger.info("bgm_id=%s  候选名=%s", target_bgm_id, bgm_fallback_names)
+    bgm_id_list, bgm_fallback_names = _bgm_canonical_names(title)
+    target_bgm_id = bgm_id_list[0] if bgm_id_list else None
+    logger.info("bgm_ids=%s  候选名=%s", bgm_id_list, bgm_fallback_names)
 
     # ── ① season_index 路径：直接查表，不搜蜜柑标题 ─────────
     if season_index is not None:
-        # bgm_id 查表
-        bangumi_id = season_index.get(target_bgm_id) if target_bgm_id else None
+        # 按 bgm 搜索顺序逐一在 season_index 中查找，第一个命中即为当季正确条目
+        bangumi_id = None
+        for bgm_id in bgm_id_list:
+            bangumi_id = season_index.get(bgm_id)
+            if bangumi_id:
+                if bgm_id != target_bgm_id:
+                    logger.info("bgm_id 兜底命中：%d（排第%d位）→ mikan_id=%d",
+                                bgm_id, bgm_id_list.index(bgm_id) + 1, bangumi_id)
+                break
 
         # 未命中（bgm 返回老季 ID / bgm 找不到）→ 标题反查
         if not bangumi_id and quarter:
@@ -830,13 +904,15 @@ def resolve_anime_rss(
     # ── ② 无索引路径：mikanani 标题搜索 + bgm_id 验证 ────────
     search_terms = _title_variants(title)
 
+    bgm_id_set = set(bgm_id_list)
+
     def _find_bgm_match(cands: list[dict]) -> "dict | None":
         for c in cands:
             data = _fetch_bangumi_data(c["id"], use_mirror)
             mikan_bgm = data.get("bgm_id")
-            logger.info("  mikan_id=%d mikan_bgm=%s target=%s",
-                        c["id"], mikan_bgm, target_bgm_id)
-            if mikan_bgm == target_bgm_id:
+            logger.info("  mikan_id=%d mikan_bgm=%s targets=%s",
+                        c["id"], mikan_bgm, bgm_id_list)
+            if mikan_bgm in bgm_id_set:
                 return c
         return None
 
@@ -867,7 +943,7 @@ def resolve_anime_rss(
                     break
 
     if matched is None:
-        logger.warning("bgm_id=%d 蜜柑无匹配：'%s' → None", target_bgm_id, title)
+        logger.warning("bgm_ids=%s 蜜柑无匹配：'%s' → None", bgm_id_list, title)
         return None
 
     best = find_best_rss(matched["id"], priorities, weeks, use_mirror)
@@ -890,11 +966,24 @@ _CHS_PATTERN = _re2.compile(
     _re2.IGNORECASE,
 )
 
-# 来源标签
+# 来源标签：原始词 → 标准化的 must_contain 字符串
+_SOURCE_NORM = {
+    "CR":          "CR",
+    "CRUNCHYROLL": "CR",
+    "BAHA":        "Baha",
+    "BAHAMUT":     "Baha",
+    "ABEMA":       "Abema",
+    "B-GLOBAL":    "B-Global",
+    "BILIBILI":    "Bilibili",
+}
+
 _SOURCE_PATTERN = _re2.compile(
     r'\b(?P<src>CR|Crunchyroll|Baha|Bahamut|Abema|B-Global|Bilibili)\b',
     _re2.IGNORECASE,
 )
+
+# 多来源时优先选取的顺序
+_SOURCE_PRIORITY = ["B-Global", "Baha", "Abema", "CR", "Bilibili"]
 
 
 def detect_rss_filter(rss_url: str) -> dict:
@@ -902,9 +991,10 @@ def detect_rss_filter(rss_url: str) -> dict:
     扫描 RSS 前 10 条条目，检测最优的去重过滤规则。
 
     策略：
-      1. 有简体内嵌（CHS / CHS&CHT）→ mustContain="CHS"，只下简体版本
-      2. 多来源（CR + Baha / Abema）→ smartFilter=True 防集数重复下载
-      3. 单来源 → mustContain="" smartFilter=True
+      1. 有简体内嵌（CHS / CHS&CHT）→ must_contain="CHS"，只下简体版本
+      2. 多来源（CR + Abema 等）→ 按优先级锁定一个来源的 must_contain，
+         避免同集多版本被同时下载（smart_filter 无法跨不同命名格式去重）
+      3. 单来源 → must_contain="" smart_filter=True
 
     返回 dict 供 QBTClient.add_rss_feed 直接使用。
     """
@@ -915,26 +1005,29 @@ def detect_rss_filter(rss_url: str) -> dict:
         titles = []
 
     if not titles:
-        return {"mustContain": "", "mustNotContain": "", "smartFilter": True}
+        return {"must_contain": "", "must_not_contain": "", "smart_filter": True}
 
     has_chs = any(_CHS_PATTERN.search(t) for t in titles)
     if has_chs:
-        logger.info("RSS 检测到简体内嵌，设置 mustContain=CHS")
-        return {"mustContain": "CHS", "mustNotContain": "", "smartFilter": True}
+        logger.info("RSS 检测到简体内嵌，设置 must_contain=CHS")
+        return {"must_contain": "CHS", "must_not_contain": "", "smart_filter": True}
 
-    # 检测来源多样性
-    sources: set[str] = set()
+    # 收集所有出现的来源：key=归一化名（用于优先级比较），value=RSS 原始大小写（用于 must_contain）
+    sources: dict[str, str] = {}   # norm_key → original_str
     for t in titles:
         m = _SOURCE_PATTERN.search(t)
         if m:
-            src = m.group("src").upper()
-            src = "CR" if src in ("CR", "CRUNCHYROLL") else src
-            src = "Baha" if src in ("BAHA", "BAHAMUT") else src
-            sources.add(src)
+            norm_key = _SOURCE_NORM.get(m.group("src").upper())
+            if norm_key and norm_key not in sources:
+                sources[norm_key] = m.group("src")   # 保留 RSS 里的原始大小写
 
     if len(sources) > 1:
-        # 多来源：smartFilter 防止同集重复，不再指定 mustContain
-        # （qBittorrent 先到先得，已下载的集数自动跳过）
-        logger.info("RSS 检测到多来源 %s，启用 smartFilter", sources)
+        # 多来源：按优先级选最优的一个来源，锁死 must_contain 避免重复下载
+        # must_contain 已唯一定位来源，smart_filter 反而会让新规则跳过历史集数，关掉
+        for preferred in _SOURCE_PRIORITY:
+            if preferred in sources:
+                contain_str = sources[preferred]
+                logger.info("RSS 多来源 %s，锁定 must_contain=%s", set(sources), contain_str)
+                return {"must_contain": contain_str, "must_not_contain": "", "smart_filter": False}
 
-    return {"mustContain": "", "mustNotContain": "", "smartFilter": True}
+    return {"must_contain": "", "must_not_contain": "", "smart_filter": True}

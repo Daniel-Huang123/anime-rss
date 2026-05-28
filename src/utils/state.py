@@ -57,6 +57,7 @@ def add_subscription(
     subgroup_name: str,
     rss_url: str,
     cover_url: str | None = None,
+    bgm_id: int | None = None,
 ) -> dict:
     """添加一条订阅记录，返回该记录 dict。如果已存在则更新。"""
     data = _load()
@@ -71,6 +72,7 @@ def add_subscription(
         "qbt_feed_path": f"{quarter}/{title}",
         "added_at": date.today().isoformat(),
         "cover_url": cover_url,
+        "bgm_id": bgm_id,
     }
 
     # 更新已有记录（按 title 去重）

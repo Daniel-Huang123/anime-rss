@@ -244,23 +244,25 @@ def scan_media_directory(root: Path | str, depth: int = 4) -> list[AnimeFolder]:
         if parsed is None:
             continue
 
-        # 用最近的非根目录作为番剧标题键
         try:
             rel = video.relative_to(root)
         except ValueError:
             rel = video
 
-        if len(rel.parts) >= 2:
-            # 有子目录，用第一层目录名作为标题
-            folder_title = rel.parts[0]
-        else:
-            # 根目录直接下面的文件，用解析出的标题
+        # 目录结构：root/[季度/]番剧名/ep.mkv
+        # 用「紧邻视频文件的父目录」作为番剧标题（跨季度自动合并）
+        # 例：2026Q2/进击的巨人/ep.mkv  →  folder_title = "进击的巨人"
+        #     进击的巨人/ep.mkv          →  folder_title = "进击的巨人"
+        anime_dir = video.parent
+        folder_title = anime_dir.name
+
+        # 如果父目录是季度文件夹（如 2026Q2）或根目录本身，退为解析标题
+        if (anime_dir == root
+                or re.match(r"^\d{4}Q\d$", folder_title)
+                or re.match(r"^(Season|S)\s*\d+$", folder_title, re.I)):
             folder_title = parsed.title
 
-        # 如果目录名更有意义（不是 Season N 这种），优先用目录名
-        if folder_title and not re.match(r"^(Season|S)\s*\d+$", folder_title, re.I):
-            parsed.title = folder_title
-
+        parsed.title = folder_title
         groups[folder_title].append(parsed)
 
     # 构建 AnimeFolder

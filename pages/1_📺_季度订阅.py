@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 
 from src.qbt.client import QBTClient
-from src.scrapers.mikanani import build_season_index, detect_rss_filter, resolve_anime_rss
+from src.scrapers.mikanani import build_season_index, build_yuc_bgm_map, detect_rss_filter, load_season_title_index, resolve_anime_rss
 from src.scrapers.yuc_wiki import clear_cache, get_season_list
 from src.utils.config import load_config
 from src.utils.cover_cache import get_or_fetch_cover
@@ -31,12 +31,17 @@ st.markdown("""
 [data-testid="stHorizontalBlock"]:has(>[data-testid="stColumn"]:nth-child(4)) {
     flex-wrap: wrap !important;
     row-gap: 12px !important;
+    align-items: flex-start !important;
 }
 [data-testid="stHorizontalBlock"]:has(>[data-testid="stColumn"]:nth-child(4))
     > [data-testid="stColumn"] {
     flex: 0 0 145px !important;
+    width: 145px !important;
     min-width: 145px !important;
     max-width: 145px !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    box-sizing: border-box !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -98,23 +103,30 @@ def _cover_bytes(url: str) -> bytes | None:
     return None
 
 
-def _cover_html(img_bytes: bytes | None, subscribed: bool) -> str:
-    border = "#00c853" if subscribed else "#2d2d2d"
-    style = (
-        f"border:3px solid {border};border-radius:8px;overflow:hidden;"
-        f"background:#1e1e2e;aspect-ratio:5/7;"
+def _cover_html(img_bytes: bytes | None, status: str = "normal", bgm_url: str = "") -> str:
+    """status: 'normal' | 'subscribed' | 'failed'"""
+    border = {"subscribed": "#00c853", "failed": "#ff4b4b"}.get(status, "#2d2d2d")
+    # <a> 用绝对定位覆盖整个封面，不参与流式布局，彻底避免黑线
+    link = (
+        f'<a href="{bgm_url}" target="_blank" '
+        f'style="position:absolute;inset:0;"></a>'
+        if bgm_url else ""
     )
     if img_bytes:
         b64 = base64.b64encode(img_bytes).decode()
-        return (
-            f'<div style="{style}">'
+        content = (
             f'<img src="data:image/jpeg;base64,{b64}" '
             f'style="width:100%;height:100%;object-fit:cover;display:block;">'
-            f'</div>'
+        )
+    else:
+        content = (
+            f'<div style="display:flex;align-items:center;justify-content:center;'
+            f'height:100%;font-size:2em;">🎬</div>'
         )
     return (
-        f'<div style="{style}display:flex;align-items:center;'
-        f'justify-content:center;font-size:2em;">🎬</div>'
+        f'<div style="position:relative;width:100%;border:3px solid {border};'
+        f'border-radius:8px;overflow:hidden;background:#1e1e2e;aspect-ratio:5/7;">'
+        f'{content}{link}</div>'
     )
 
 
@@ -130,18 +142,28 @@ with c3:
     refresh_btn = st.button("🔃 刷新缓存", use_container_width=True)
 
 if refresh_btn:
+    # 只清季度数据缓存（yuc.wiki 番单 + mikan 索引），封面缓存永久保留
     clear_cache()
-    import shutil as _shutil
-    if _COVER_CACHE_DIR.exists():
-        _shutil.rmtree(_COVER_CACHE_DIR)
-        _COVER_CACHE_DIR.mkdir(exist_ok=True)
+    from src.scrapers.mikanani import _CACHE_FILE as _mikan_cache_file
+    import json as _json
+    # 只删 season_index 和 yuc_bgm_map 相关 key，保留 bangumi_data（含封面来源）
+    if _mikan_cache_file.exists():
+        try:
+            _cd = _json.loads(_mikan_cache_file.read_text(encoding="utf-8"))
+            _cd = {k: v for k, v in _cd.items()
+                   if not (k.startswith("season_index:") or k.startswith("yuc_bgm_map:"))}
+            _mikan_cache_file.write_text(_json.dumps(_cd, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            _mikan_cache_file.unlink(missing_ok=True)  # 损坏则直接删掉，下次重建
     st.session_state.pop("anime_list", None)
     st.session_state.pop("loaded_quarter", None)
     st.session_state.pop("season_index", None)
     st.session_state.pop("covers_prefetched", None)
+    st.session_state["search_kw"] = ""
 
 if load_btn:
     st.session_state.pop("anime_list", None)
+    st.session_state["search_kw"] = ""
 
 if "anime_list" not in st.session_state:
     year, month = quarter_to_ym(selected_quarter)
@@ -156,11 +178,25 @@ if "anime_list" not in st.session_state:
             st.stop()
 
 # 构建/加载蜜柑季度索引（首次需要，后续走磁盘缓存自动命中）
-if "season_index" not in st.session_state:
+# 用 not season_index 而非 not in session_state，避免空 dict {} 卡住后续流程
+if not st.session_state.get("season_index"):
     with st.spinner("正在构建蜜柑番组索引（首次约 30-40 秒，之后自动缓存 7 天）..."):
         st.session_state["season_index"] = build_season_index(
             selected_quarter, use_mirror=use_mirror
         )
+    st.session_state.pop("yuc_bgm_map", None)  # 索引刷新时重建映射
+
+# 构建 yuc标题 → bgm_id 映射（首次含 BGM API 补全，之后走缓存）
+if "yuc_bgm_map" not in st.session_state:
+    _titles = [a["title"] for a in st.session_state.get("anime_list", [])]
+    if _titles:
+        with st.spinner("正在补全 BGM 映射..."):
+            st.session_state["yuc_bgm_map"] = build_yuc_bgm_map(
+                _titles,
+                st.session_state.get("season_index") or {},
+                selected_quarter,
+                use_mirror=use_mirror,
+            )
 
 # 并行预取封面（只取未缓存的，已有磁盘缓存的跳过）
 if "covers_prefetched" not in st.session_state:
@@ -181,6 +217,12 @@ anime_list     = st.session_state.get("anime_list", [])
 loaded_quarter = st.session_state.get("loaded_quarter", selected_quarter)
 season_index   = st.session_state.get("season_index") or {}
 
+_yuc_bgm_map: dict[str, int] = st.session_state.get("yuc_bgm_map") or {}
+
+def _get_bgm_url(title: str) -> str:
+    bgm_id = _yuc_bgm_map.get(title)
+    return f"https://bgm.tv/subject/{bgm_id}" if bgm_id else ""
+
 if not anime_list:
     st.info("点击「加载番单」开始")
     st.stop()
@@ -197,6 +239,7 @@ with fc1:
     search_kw = st.text_input(
         "搜索", placeholder="🔍 输入关键词筛选",
         label_visibility="collapsed",
+        key="search_kw",
     )
 with fc2:
     hide_subbed = st.checkbox("隐藏已订阅", value=False)
@@ -258,7 +301,13 @@ for day in ordered_days:
         with col_obj:
             # 封面
             img_bytes = _cover_bytes(cover_url)
-            st.markdown(_cover_html(img_bytes, is_sub), unsafe_allow_html=True)
+            _bgm_url = _get_bgm_url(title)
+            _card_status = (
+                "subscribed" if is_sub
+                else "failed" if st.session_state.get(f"fail_{gidx}")
+                else "normal"
+            )
+            st.markdown(_cover_html(img_bytes, _card_status, _bgm_url), unsafe_allow_html=True)
 
             # 标题（≤16字，超出截断）
             disp = title[:15] + "…" if len(title) > 15 else title
@@ -324,63 +373,85 @@ for day in ordered_days:
 
             elif st.session_state.get(fail_key):
                 # ── 失败重试区 ──────────────────────────────
-                st.markdown(
-                    '<p style="color:#ff4b4b;font-size:0.75em;text-align:center;'
-                    'margin:2px 0;">❌ 未找到</p>',
-                    unsafe_allow_html=True,
-                )
-                custom_term = st.text_input(
-                    "搜索词", key=f"ct_{gidx}",
-                    value=st.session_state.get(retry_key, title),
-                    label_visibility="collapsed",
-                    placeholder="修改蜜柑搜索词",
-                )
-                c_retry, c_cancel = st.columns(2)
-                with c_retry:
-                    do_retry = st.button("重试", key=f"rb_{gidx}",
-                                        use_container_width=True, type="primary")
-                with c_cancel:
-                    if st.button("取消", key=f"rc_{gidx}", use_container_width=True):
-                        st.session_state.pop(fail_key, None)
-                        st.rerun()
-
-                if do_retry:
-                    st.session_state[retry_key] = custom_term
-                    with st.spinner("重试中..."):
-                        result = resolve_anime_rss(
-                            title, priorities, weeks, use_mirror,
-                            search_override=custom_term,
-                            season_index=None,  # override 时跳过索引
-                        )
-                    if result is None:
-                        st.error("仍然未找到", icon="❌")
-                    else:
-                        _dl_path = (
-                            f"{qbt_save_path}/{loaded_quarter}/{title}"
-                            if qbt_save_path else ""
-                        )
-                        _rss_filter = detect_rss_filter(result["rss_url"])
-                        ok, qbt_msg = qbt.add_rss_feed(
-                            url=result["rss_url"],
-                            path=f"{loaded_quarter}/{title}",
-                            save_path=_dl_path,
-                            **_rss_filter,
-                        )
-                        if ok:
-                            get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
-                            add_subscription(
-                                quarter=loaded_quarter, title=title,
-                                bangumi_id=result["bangumi_id"],
-                                subgroup_id=result["subgroup_id"],
-                                subgroup_name=result["subgroup_name"],
-                                rss_url=result["rss_url"],
-                                cover_url=cover_url or None,
+                edit_key = f"edit_{gidx}"
+                if st.session_state.get(edit_key):
+                    # 展开态：输入框 + 确认/取消
+                    custom_term = st.text_input(
+                        "搜索词", key=f"ct_{gidx}",
+                        value=st.session_state.get(retry_key, title),
+                        label_visibility="collapsed",
+                        placeholder="修改蜜柑搜索词",
+                    )
+                    ce, cc = st.columns(2)
+                    with ce:
+                        do_retry = st.button("确认", key=f"rb_{gidx}",
+                                             use_container_width=True, type="primary")
+                    with cc:
+                        if st.button("取消", key=f"rc_{gidx}", use_container_width=True):
+                            st.session_state.pop(edit_key, None)
+                            st.rerun()
+                    if do_retry:
+                        st.session_state[retry_key] = custom_term
+                        st.session_state.pop(edit_key, None)
+                        with st.spinner("重试中..."):
+                            result = resolve_anime_rss(
+                                title, priorities, weeks, use_mirror,
+                                search_override=custom_term,
+                                season_index=None,
                             )
-                            subbed_titles.add(title)
+                        if result is None:
+                            st.error("仍然未找到", icon="❌")
+                        else:
+                            _dl_path = (
+                                f"{qbt_save_path}/{loaded_quarter}/{title}"
+                                if qbt_save_path else ""
+                            )
+                            _rss_filter = detect_rss_filter(result["rss_url"])
+                            ok, qbt_msg = qbt.add_rss_feed(
+                                url=result["rss_url"],
+                                path=f"{loaded_quarter}/{title}",
+                                save_path=_dl_path,
+                                **_rss_filter,
+                            )
+                            if ok:
+                                get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
+                                add_subscription(
+                                    quarter=loaded_quarter, title=title,
+                                    bangumi_id=result["bangumi_id"],
+                                    subgroup_id=result["subgroup_id"],
+                                    subgroup_name=result["subgroup_name"],
+                                    rss_url=result["rss_url"],
+                                    cover_url=cover_url or None,
+                                    bgm_id=result.get("mikan_bgm_id"),
+                                )
+                                subbed_titles.add(title)
+                                st.session_state.pop(fail_key, None)
+                                # 更新 bgm URL 映射，下次渲染立即生效
+                                _bgm_new = result.get("mikan_bgm_id")
+                                if _bgm_new:
+                                    _map = st.session_state.get("yuc_bgm_map") or {}
+                                    _map[title] = _bgm_new
+                                    st.session_state["yuc_bgm_map"] = _map
+                                st.rerun()
+                            else:
+                                st.warning(qbt_msg)
+                else:
+                    # 折叠态：与「确认取消订阅」等高
+                    st.markdown(
+                        '<p style="color:#ff4b4b;font-size:0.75em;text-align:center;'
+                        'margin:2px 0;">❌ 未找到</p>',
+                        unsafe_allow_html=True,
+                    )
+                    cf, cx = st.columns(2)
+                    with cf:
+                        if st.button("搜索", key=f"rb_{gidx}",
+                                     use_container_width=True, type="primary"):
+                            st.session_state[edit_key] = True
+                            st.rerun()
+                    with cx:
+                        if st.button("✕", key=f"rc_{gidx}", use_container_width=True):
                             st.session_state.pop(fail_key, None)
                             st.rerun()
-                        else:
-                            st.warning(qbt_msg)
 
             else:
                 # ── 正常订阅按钮 ────────────────────────────
@@ -419,6 +490,7 @@ for day in ordered_days:
                                 subgroup_name=result["subgroup_name"],
                                 rss_url=result["rss_url"],
                                 cover_url=cover_url or None,
+                                bgm_id=result.get("mikan_bgm_id"),
                             )
                             subbed_titles.add(title)
                             st.rerun()
