@@ -1,11 +1,10 @@
 """config.yaml 的读写工具。"""
 
-from pathlib import Path
 from typing import Any
 
 import yaml
 
-CONFIG_FILE = Path(__file__).parent.parent.parent / "config.yaml"
+from src.utils.runtime_paths import CONFIG_FILE
 
 
 def load_config() -> dict:

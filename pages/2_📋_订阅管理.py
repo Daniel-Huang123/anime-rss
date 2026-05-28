@@ -7,6 +7,7 @@ from src.qbt.client import QBTClient
 from src.utils.config import load_config
 from src.utils.season import current_quarter
 from src.utils.state import get_all_subscriptions_flat, remove_subscription
+from src.utils.ui_refresh import apply_auto_refresh
 
 st.set_page_config(page_title="订阅管理", page_icon="📋", layout="wide")
 st.title("📋 订阅管理")
@@ -16,6 +17,8 @@ try:
 except FileNotFoundError:
     st.error("请先在「设置」页面完成配置。")
     st.stop()
+
+apply_auto_refresh(cfg, "subscription_manage")
 
 qbt_cfg = cfg["qbittorrent"]
 qbt_save_path = qbt_cfg.get("save_path", "").strip().strip('"').strip("'")

@@ -100,7 +100,7 @@ uv run streamlit run app.py
 1. 下载安装 [PotPlayer](https://potplayer.daum.net/)（64位）
 2. 在 PotPlayer 中：**选项 → 播放 → 播放列表 → 保存最近播放记录** 勾选
 3. 本应用会自动读取 PotPlayer 标准播放列表历史：`%APPDATA%\PotPlayerMini64\Playlist\PotPlayerMini64.dpl`
-4. 如果从媒体库页面点击剧集播放，应用会同步写入项目根目录的 `watch_history.json`
+4. 如果从媒体库页面点击剧集播放，应用会同步写入运行目录的 `watch_history.json`
 
 播放记录中包含文件路径和最后播放时间，媒体库据此显示：
 - 橙色进度条：观看进行中
@@ -109,9 +109,9 @@ uv run streamlit run app.py
 
 ### 播放脚本（可选）
 
-项目根目录附带 `potplayer_tracker.as`（AngelScript 模板），可实现显式播放日志：
+运行目录附带 `potplayer_tracker.as`（AngelScript 模板），可实现显式播放日志：
 - 先把 `MEDIA_ROOT` 改成 `config.yaml` 里的 `qbittorrent.save_path`
-- 再把 `LOG_FILE` 改成项目根目录下的 `potplayer_plays.txt`
+- 再把 `LOG_FILE` 改成运行目录下的 `potplayer_plays.txt`
 - 放入 PotPlayer 的 AngelScript 扩展目录并启用
 
 `watch_history.json` 和 `potplayer_plays.txt` 是本地运行数据，已加入 `.gitignore`，不会进入仓库。
@@ -123,6 +123,59 @@ uv run streamlit run app.py
 - **`.cover_cache/`**：订阅时预取的 yuc.wiki 封面，永久保留，不随刷新缓存删除
 - **`assets/covers/`**：从 mikanani 抓取的高清封面，按 bangumi_id 存储
 - **刷新缓存**按钮只清除季度索引（season_index）和 bgm 映射缓存，封面不受影响，媒体库历史封面始终可用
+
+---
+
+## 打包为 EXE（Windows）
+
+### 1. 安装依赖
+
+```bash
+uv sync
+```
+
+### 2. 构建
+
+```bash
+build_exe.bat
+```
+
+输出目录：`dist/anime-rss/anime-rss.exe`
+
+### 3. 运行与数据目录说明
+
+- 开发模式：配置和状态写入项目根目录
+- EXE 模式：配置和状态写入 **exe 同目录**
+- 首次运行若无 `config.yaml`，可从 `config.example.yaml` 复制
+
+---
+
+## 原生 GUI（迁移中）
+
+已提供 `PySide6` 迁移版（`gui/`），当前已覆盖：
+- `Dashboard`：季度概览、当前订阅、最近更新媒体
+- `Season Subscribe`：季度番单、封面展示、点击封面跳转 BGM、订阅/取消订阅
+- `Subscription Manage`：订阅列表与按季度删除
+- `Quarter Cleanup`：按保留季度批量清理 + 清理历史
+- `Media Library`：封面网格/列表、继续观看、点击封面查看剧集详情并播放
+- `Settings`：qBittorrent、字幕优先级、清理与高级参数、自动刷新、连接测试
+
+### 启动方式
+
+```bash
+uv sync --group gui
+uv run python -m gui.main
+```
+
+---
+
+## 自动刷新
+
+在「⚙️ 设置」新增了：
+- `开启自动刷新`
+- `刷新间隔（秒）`
+
+开启后，主页与业务页面会自动按间隔刷新（适合边下载边看状态）。
 
 ---
 

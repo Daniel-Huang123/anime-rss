@@ -23,10 +23,8 @@ State 结构：
 
 import json
 from datetime import date
-from pathlib import Path
 
-
-STATE_FILE = Path(__file__).parent.parent.parent / "state.json"
+from src.utils.runtime_paths import STATE_FILE
 
 _EMPTY: dict = {"subscriptions": {}, "cleanup_log": []}
 

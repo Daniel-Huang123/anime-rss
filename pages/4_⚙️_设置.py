@@ -18,6 +18,7 @@ except FileNotFoundError:
         "resource_check": {"recent_weeks": 4},
         "cleanup": {"keep_quarters": 2, "delete_files": True},
         "advanced": {"use_mirror": False, "request_delay": 1.0},
+        "ui": {"auto_refresh_enabled": False, "auto_refresh_seconds": 30},
     }
 
 # ── qBittorrent 配置 ──────────────────────────────────────
@@ -104,6 +105,27 @@ with col_a2:
         value=float(cfg.get("advanced", {}).get("request_delay", 1.0)),
     )
 
+st.divider()
+
+# ── 界面自动刷新 ──────────────────────────────────────────
+st.subheader("🔄 界面自动刷新")
+col_u1, col_u2 = st.columns(2)
+with col_u1:
+    auto_refresh_enabled = st.checkbox(
+        "开启自动刷新",
+        value=cfg.get("ui", {}).get("auto_refresh_enabled", False),
+        help="开启后，主页和业务页面会按固定间隔自动刷新。",
+    )
+with col_u2:
+    auto_refresh_seconds = st.number_input(
+        "刷新间隔（秒）",
+        min_value=5,
+        max_value=3600,
+        step=5,
+        value=int(cfg.get("ui", {}).get("auto_refresh_seconds", 30)),
+        disabled=not auto_refresh_enabled,
+    )
+
 # ── 保存 ──────────────────────────────────────────────────
 st.divider()
 if st.button("💾 保存配置", type="primary", use_container_width=False):
@@ -121,6 +143,10 @@ if st.button("💾 保存配置", type="primary", use_container_width=False):
         "resource_check": {"recent_weeks": int(recent_weeks)},
         "cleanup": {"keep_quarters": int(keep_quarters), "delete_files": delete_files},
         "advanced": {"use_mirror": use_mirror, "request_delay": float(request_delay)},
+        "ui": {
+            "auto_refresh_enabled": bool(auto_refresh_enabled),
+            "auto_refresh_seconds": int(auto_refresh_seconds),
+        },
     }
     save_config(new_cfg)
     st.success("✅ 配置已保存！")

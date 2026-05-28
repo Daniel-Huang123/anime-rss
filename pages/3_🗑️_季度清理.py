@@ -12,6 +12,7 @@ from src.utils.state import (
     log_cleanup,
     remove_subscription,
 )
+from src.utils.ui_refresh import apply_auto_refresh
 
 st.set_page_config(page_title="季度清理", page_icon="🗑️", layout="wide")
 st.title("🗑️ 季度清理")
@@ -21,6 +22,8 @@ try:
 except FileNotFoundError:
     st.error("请先在「设置」页面完成配置。")
     st.stop()
+
+apply_auto_refresh(cfg, "quarter_cleanup")
 
 keep_quarters = cfg.get("cleanup", {}).get("keep_quarters", 2)
 delete_files = cfg.get("cleanup", {}).get("delete_files", True)

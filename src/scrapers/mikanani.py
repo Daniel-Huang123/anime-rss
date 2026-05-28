@@ -13,10 +13,10 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import quote
 
 import feedparser
+from src.utils.runtime_paths import MIKAN_CACHE_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ MIKAN_MIRROR = "https://mikanime.tv"  # 备用镜像（某些地区使用）
 
 # ── 磁盘缓存（搜索结果 + 字幕组列表）────────────────────
 # 缓存文件放在项目根目录，季度内基本稳定，7天过期
-_CACHE_FILE = Path(__file__).parent.parent.parent / ".mikan_cache.json"
+_CACHE_FILE = MIKAN_CACHE_FILE
 _CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 天
 
 
