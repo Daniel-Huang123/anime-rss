@@ -3,12 +3,15 @@ import os as _os
 import html as _html_mod
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
-# stdlib html 包（yuc_wiki.py 函数体内 from html.parser import HTMLParser 是延迟导入，
-# PyInstaller 静态分析扫不到，必须手动把整个 html/ 目录打进 _internal）
+# stdlib html + _markupbase（yuc_wiki.py 函数体内 from html.parser import HTMLParser
+# 是延迟导入，PyInstaller 静态分析扫不到，必须手动打进 _internal）
+import _markupbase as _mb_mod
 _html_dir = _os.path.dirname(_html_mod.__file__)
+_markupbase_file = _mb_mod.__file__
 datas = [
     ('app.py', '.'), ('pages', 'pages'), ('src', 'src'), ('config.example.yaml', '.'),
     (_html_dir, 'html'),
+    (_markupbase_file, '.'),
 ]
 binaries = []
 hiddenimports = []
