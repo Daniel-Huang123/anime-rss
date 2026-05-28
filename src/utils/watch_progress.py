@@ -15,13 +15,15 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from src.utils.runtime_paths import POTPLAYER_LOG_FILE, WATCH_HISTORY_FILE
+
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".m2ts", ".ts"}
 
 _RECENT_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
 
-# 本地播放历史文件，存放在项目根目录
-_HISTORY_FILE  = Path(__file__).parent.parent.parent / "watch_history.json"
-_POTPLAYER_LOG = Path(__file__).parent.parent.parent / "potplayer_plays.txt"
+# 本地播放历史文件
+_HISTORY_FILE = WATCH_HISTORY_FILE
+_POTPLAYER_LOG = POTPLAYER_LOG_FILE
 _DPL_FILE      = Path(os.environ.get("APPDATA", "")) / "PotPlayerMini64" / "Playlist" / "PotPlayerMini64.dpl"
 
 
@@ -267,6 +269,17 @@ def last_watched_episode(
     if not candidates:
         return None, None
     return max(candidates, key=lambda x: x[1])
+
+
+def resume_episode(
+    episode_files: list[Path],
+    recently_played: dict[str, datetime],
+) -> Path | None:
+    """继续观看目标：优先最近播放的当前集；无历史时回到第一集。"""
+    last, _ = last_watched_episode(episode_files, recently_played)
+    if last is not None:
+        return last
+    return episode_files[0] if episode_files else None
 
 
 def next_unwatched_episode(
