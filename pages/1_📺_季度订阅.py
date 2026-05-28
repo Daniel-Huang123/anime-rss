@@ -120,8 +120,8 @@ def _cover_html(img_bytes: bytes | None, status: str = "normal", bgm_url: str = 
         )
     else:
         content = (
-            f'<div style="display:flex;align-items:center;justify-content:center;'
-            f'height:100%;font-size:2em;">🎬</div>'
+            '<div style="display:flex;align-items:center;justify-content:center;'
+            'height:100%;font-size:2em;">🎬</div>'
         )
     return (
         f'<div style="position:relative;width:100%;border:3px solid {border};'
