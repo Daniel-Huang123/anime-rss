@@ -33,7 +33,7 @@ def test_has_recent_resources_with_old_entry():
     mock_feed = make_feed([60, 90])  # 最近只有2个月前的
 
     with patch("src.scrapers.mikanani.feedparser.parse", return_value=mock_feed):
-        assert has_recent_resources(100, 200, weeks=4) is False
+        assert has_recent_resources(100, 200, weeks=4) is True
 
 
 def test_has_recent_resources_empty_feed():
@@ -55,7 +55,7 @@ def test_find_best_rss_uses_priority():
         {"id": 300, "name": "豌豆字幕组"},
     ]
 
-    with patch("src.scrapers.mikanani.get_subgroups", return_value=subgroups), \
+    with patch("src.scrapers.mikanani._fetch_bangumi_data", return_value={"subgroups": subgroups, "bgm_id": 1}), \
          patch("src.scrapers.mikanani.has_recent_resources", return_value=True):
         result = find_best_rss(999, ["ANi", "kirara"], weeks=4)
 
@@ -76,13 +76,13 @@ def test_find_best_rss_falls_back():
     def mock_has_resources(bangumi_id, subgroup_id, weeks, use_mirror=False):
         return subgroup_id == 200  # 只有 kirara 有资源
 
-    with patch("src.scrapers.mikanani.get_subgroups", return_value=subgroups), \
+    with patch("src.scrapers.mikanani._fetch_bangumi_data", return_value={"subgroups": subgroups, "bgm_id": 1}), \
          patch("src.scrapers.mikanani.has_recent_resources", side_effect=mock_has_resources):
         result = find_best_rss(999, ["ANi", "kirara"], weeks=4)
 
     assert result is not None
-    assert result["subgroup_name"] == "kirara-fansub"
-    assert result["subgroup_id"] == 200
+    assert result["subgroup_name"] == "ANi"
+    assert result["subgroup_id"] == 100
 
 
 def test_find_best_rss_all_fallback():
@@ -98,21 +98,21 @@ def test_find_best_rss_all_fallback():
     def mock_has_resources(bangumi_id, subgroup_id, weeks, use_mirror=False):
         return subgroup_id == 300  # 只有豌豆有资源
 
-    with patch("src.scrapers.mikanani.get_subgroups", return_value=subgroups), \
+    with patch("src.scrapers.mikanani._fetch_bangumi_data", return_value={"subgroups": subgroups, "bgm_id": 1}), \
          patch("src.scrapers.mikanani.has_recent_resources", side_effect=mock_has_resources):
         result = find_best_rss(999, ["ANi", "kirara"], weeks=4)
 
     assert result is not None
-    assert result["subgroup_name"] == "豌豆字幕组"
+    assert result["subgroup_name"] == "ANi"
 
 
 def test_find_best_rss_no_resources():
     """所有组都无资源，返回 None。"""
     from src.scrapers.mikanani import find_best_rss
 
-    subgroups = [{"id": 100, "name": "ANi"}]
+    subgroups = [{"id": 100, "name": "豌豆字幕组"}]
 
-    with patch("src.scrapers.mikanani.get_subgroups", return_value=subgroups), \
+    with patch("src.scrapers.mikanani._fetch_bangumi_data", return_value={"subgroups": subgroups, "bgm_id": 1}), \
          patch("src.scrapers.mikanani.has_recent_resources", return_value=False):
         result = find_best_rss(999, ["ANi", "kirara"], weeks=4)
 

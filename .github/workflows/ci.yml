@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Syntax check (py compile)
+        run: |
+          uv run python -m compileall src pages app.py -q
+
+      - name: Ruff lint
+        run: |
+          uv run ruff check src pages app.py --select E,F,W --ignore E501,E402,F401
+
+      - name: Pytest
+        run: |
+          uv run pytest tests/ -v

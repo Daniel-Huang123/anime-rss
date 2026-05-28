@@ -23,3 +23,8 @@ cleanup:
 advanced:
   use_mirror: false            # 使用 mikanime.tv 镜像
   request_delay: 1.0           # 批量订阅请求间隔（秒）
+
+# 媒体库会扫描 qbittorrent.save_path，并自动读取：
+# - 项目根目录 watch_history.json（从媒体库页面播放时写入）
+# - PotPlayer 标准播放列表历史
+# - Windows Recent Files（兜底）
