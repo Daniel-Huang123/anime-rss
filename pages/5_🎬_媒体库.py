@@ -14,12 +14,13 @@ from urllib.parse import quote as _url_quote
 
 from src.utils.config import load_config
 from src.utils.file_parser import AnimeFolder, enrich_with_state, scan_media_directory
+from src.utils.runtime_paths import COVER_CACHE_DIR
+from src.utils.ui_refresh import apply_auto_refresh
 from src.utils.watch_progress import (
     get_recently_played,
     get_watch_status,
-    last_watched_episode,
-    next_unwatched_episode,
     record_played,
+    resume_episode,
 )
 
 st.set_page_config(page_title="媒体库", page_icon="🎬", layout="wide")
@@ -45,7 +46,7 @@ def _get_recent(path_str: str):
 
 # ── 封面读取（优先 .cover_cache/ 磁盘缓存，与订阅页一致）──
 
-_COVER_CACHE_DIR = Path(__file__).parent.parent / ".cover_cache"
+_COVER_CACHE_DIR = COVER_CACHE_DIR
 
 
 def _folder_cover(folder: AnimeFolder) -> bytes | None:
@@ -155,6 +156,8 @@ except FileNotFoundError:
     st.error("请先在「设置」页面完成配置。")
     st.stop()
 
+apply_auto_refresh(cfg, "media_library")
+
 media_path_str = cfg["qbittorrent"].get("save_path", "")
 media_path = Path(media_path_str) if media_path_str else Path()
 
@@ -205,13 +208,13 @@ if "selected_anime" in st.session_state:
             + (f"  ·  最新：**{latest.episode_label}**" if latest else "")
         )
         # 继续观看按钮
-        nxt = next_unwatched_episode(all_paths, recently_played)
-        if nxt:
-            nxt_ep = next((e for e in all_eps if e.file_path == nxt), None)
-            btn_label = f"▶ 继续观看  {nxt_ep.episode_label if nxt_ep else nxt.name}"
+        current = resume_episode(all_paths, recently_played)
+        if current:
+            current_ep = next((e for e in all_eps if e.file_path == current), None)
+            btn_label = f"▶ 继续观看  {current_ep.episode_label if current_ep else current.name}"
             if st.button(btn_label, type="primary", key="continue_main"):
-                _open_file(str(nxt))
-                st.toast(f"正在播放：{nxt.name[:40]}", icon="▶️")
+                _open_file(str(current))
+                st.toast(f"正在播放：{current.name[:40]}", icon="▶️")
 
     st.divider()
     st.subheader("📂 剧集列表")
@@ -280,14 +283,18 @@ display_folders = [f for f in folders if search.lower() in f.title.lower()] if s
 in_progress = []
 for f in display_folders:
     eps = f.sorted_episodes()
-    nxt = next_unwatched_episode([e.file_path for e in eps], recently_played)
-    if nxt and any(e.file_path in {Path(k) for k, v in get_watch_status(
-            [e.file_path for e in eps], recently_played).items() if v} for e in eps):
-        in_progress.append((f, nxt))
+    paths = [e.file_path for e in eps]
+    ws = get_watch_status(paths, recently_played)
+    watched_n = sum(1 for v in ws.values() if v)
+    if watched_n == 0 or watched_n >= len(paths):
+        continue
+    current = resume_episode(paths, recently_played)
+    if current:
+        in_progress.append((f, current))
 
 if in_progress:
     st.markdown("##### ▶ 继续观看")
-    for f, nxt in in_progress[:4]:
+    for f, current in in_progress[:4]:
         eps_f = f.sorted_episodes()
         paths_f = [e.file_path for e in eps_f]
         ws_f = get_watch_status(paths_f, recently_played)
@@ -313,10 +320,10 @@ if in_progress:
                 + (f"  ·  已看 **{watched_n_f}** 集" if watched_n_f else "")
                 + (f"  ·  最新：**{latest_f.episode_label}**" if latest_f else "")
             )
-            nxt_ep_f = next((e for e in eps_f if e.file_path == nxt), None)
-            btn_lbl = f"▶ 继续观看  {nxt_ep_f.episode_label if nxt_ep_f else nxt.name}"
+            current_ep_f = next((e for e in eps_f if e.file_path == current), None)
+            btn_lbl = f"▶ 继续观看  {current_ep_f.episode_label if current_ep_f else current.name}"
             if st.button(btn_lbl, key=f"ip_{f.title}", type="primary"):
-                _open_file(str(nxt))
+                _open_file(str(current))
                 st.toast(f"▶ {f.title[:20]}", icon="▶️")
         st.divider()
 
