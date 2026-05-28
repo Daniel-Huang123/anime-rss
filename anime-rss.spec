@@ -1,7 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os as _os
+import html as _html_mod
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
-datas = [('app.py', '.'), ('pages', 'pages'), ('src', 'src'), ('config.example.yaml', '.')]
+# stdlib html 包（yuc_wiki.py 函数体内 from html.parser import HTMLParser 是延迟导入，
+# PyInstaller 静态分析扫不到，必须手动把整个 html/ 目录打进 _internal）
+_html_dir = _os.path.dirname(_html_mod.__file__)
+datas = [
+    ('app.py', '.'), ('pages', 'pages'), ('src', 'src'), ('config.example.yaml', '.'),
+    (_html_dir, 'html'),
+]
 binaries = []
 hiddenimports = []
 
@@ -100,6 +108,9 @@ hiddenimports += [
     # pkg_resources（scrapling/browserforge 可能用到）
     'pkg_resources',
 ]
+
+# ── stdlib html 包（feedparser/lxml 动态导入，collect_submodules 确保打进去）
+hiddenimports += collect_submodules('html')
 
 
 a = Analysis(

@@ -18,9 +18,15 @@ config.yaml
 assets/covers/
 .mikan_cache.json
 .cover_cache/
+.pending_checks.json
 watch_history.json
 potplayer_plays.txt
 plan.md
+launcher.log
+
+# Local-only build artifacts
+release/
+*-debug.spec
 
 # Streamlit
 .streamlit/
