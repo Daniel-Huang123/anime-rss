@@ -101,17 +101,24 @@ def _prepare_subscription_index(data: dict) -> tuple[dict[str, set[str]], bool]:
     return existing, pruned
 
 
-def _apply_discovered_subscriptions(data: dict, existing: dict[str, set[str]], discovered: set[tuple[str, str]]) -> int:
+def _apply_discovered_subscriptions(
+    data: dict,
+    existing: dict[str, set[str]],
+    discovered: set[tuple[str, str]],
+    subgroups: dict[tuple[str, str], str] | None = None,
+) -> int:
+    subgroups = subgroups or {}
     added = 0
     for quarter, title in sorted(discovered):
         known_titles = existing.setdefault(quarter, set())
         if title in known_titles:
             continue
+        sg = str(subgroups.get((quarter, title), "") or "").strip()
         entry = {
             "title": title,
             "bangumi_id": 0,
             "subgroup_id": 0,
-            "subgroup_name": "local",
+            "subgroup_name": sg or "local",
             "rss_url": "",
             "qbt_feed_path": f"{quarter}/{title}",
             "added_at": date.today().isoformat(),
@@ -123,6 +130,46 @@ def _apply_discovered_subscriptions(data: dict, existing: dict[str, set[str]], d
         known_titles.add(title)
         added += 1
     return added
+
+
+def _backfill_local_subgroups(
+    data: dict, subgroups: dict[tuple[str, str], str]
+) -> int:
+    """给已存在的 recovered_local 记录补写从文件名解析出的字幕组。
+
+    只在原 subgroup_name 为空 / "local" 时覆盖，不动用户或订阅流程已确定的字幕组。
+    返回更新条数。
+    """
+    if not subgroups:
+        return 0
+    changed = 0
+    for quarter, subs in data.get("subscriptions", {}).items():
+        for item in subs:
+            if not item.get("recovered_local"):
+                continue
+            title = str(item.get("title", "")).strip()
+            sg = str(subgroups.get((quarter, title), "") or "").strip()
+            if not sg:
+                continue
+            cur = str(item.get("subgroup_name", "")).strip().lower()
+            if cur in {"", "local"} and item.get("subgroup_name") != sg:
+                item["subgroup_name"] = sg
+                changed += 1
+    return changed
+
+
+def _detect_folder_subgroup(folder) -> str:
+    """从一部番的剧集文件名里取出现最多的字幕组（如 [ANi] → "ANi"）。"""
+    from collections import Counter
+
+    names = [
+        str(getattr(ep, "subgroup", "") or "").strip()
+        for ep in (getattr(folder, "episodes", []) or [])
+    ]
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    return Counter(names).most_common(1)[0][0]
 
 
 def sync_local_subscriptions(media_root: Path | str) -> int:
@@ -203,6 +250,7 @@ def sync_local_subscriptions_from_folders(
     existing, pruned = _prepare_subscription_index(data)
     fallback_quarter = current_quarter()
     discovered: set[tuple[str, str]] = set()
+    subgroups: dict[tuple[str, str], str] = {}
 
     for folder in folders:
         title = str(getattr(folder, "title", "")).strip()
@@ -224,9 +272,13 @@ def sync_local_subscriptions_from_folders(
                 except Exception:
                     pass
         discovered.add((quarter, title))
+        sg = _detect_folder_subgroup(folder)
+        if sg:
+            subgroups[(quarter, title)] = sg
 
-    added = _apply_discovered_subscriptions(data, existing, discovered)
-    if added or pruned:
+    added = _apply_discovered_subscriptions(data, existing, discovered, subgroups)
+    backfilled = _backfill_local_subgroups(data, subgroups)
+    if added or pruned or backfilled:
         _save(data)
     return added
 

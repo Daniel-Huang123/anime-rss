@@ -224,6 +224,64 @@ def test_enrich_recovered_subscriptions_from_rules_by_title_fallback(tmp_state):
     assert sub["bangumi_id"] == 222
 
 
+def test_sync_from_folders_detects_subgroup(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions_from_folders
+    from src.utils.file_parser import AnimeFolder, ParsedAnime
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    root = tmp_path / "media"
+    (root / "2026Q2" / "番剧X").mkdir(parents=True, exist_ok=True)
+    f1 = root / "2026Q2" / "番剧X" / "01.mkv"
+    f2 = root / "2026Q2" / "番剧X" / "02.mkv"
+    f1.write_bytes(b"x")
+    f2.write_bytes(b"x")
+    eps = [
+        ParsedAnime(file_path=f1, title="番剧X", episode="1", subgroup="ANi"),
+        ParsedAnime(file_path=f2, title="番剧X", episode="2", subgroup="ANi"),
+    ]
+    folder = AnimeFolder(title="番剧X", episodes=eps)
+
+    added = sync_local_subscriptions_from_folders(root, [folder])
+    assert added == 1
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["subgroup_name"] == "ANi"
+    assert sub["recovered_local"] is True
+
+
+def test_sync_from_folders_backfills_subgroup_on_existing_local(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions_from_folders
+    from src.utils.file_parser import AnimeFolder, ParsedAnime
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    # 预置一条旧的 recovered_local（subgroup_name="local"）
+    raw = json.loads(tmp_state.read_text(encoding="utf-8"))
+    raw["subscriptions"]["2026Q2"] = [{
+        "title": "番剧Y", "bangumi_id": 0, "subgroup_id": 0,
+        "subgroup_name": "local", "rss_url": "", "qbt_feed_path": "2026Q2/番剧Y",
+        "added_at": "2026-05-29", "cover_url": None, "bgm_id": None,
+        "recovered_local": True,
+    }]
+    tmp_state.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    root = tmp_path / "media"
+    (root / "2026Q2" / "番剧Y").mkdir(parents=True, exist_ok=True)
+    f1 = root / "2026Q2" / "番剧Y" / "01.mkv"
+    f1.write_bytes(b"x")
+    folder = AnimeFolder(
+        title="番剧Y",
+        episodes=[ParsedAnime(file_path=f1, title="番剧Y", episode="1", subgroup="kirara")],
+    )
+
+    added = sync_local_subscriptions_from_folders(root, [folder])
+    assert added == 0  # 已存在，不新增
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["subgroup_name"] == "kirara"  # 已回填
+
+
 def test_sync_local_subscriptions_skips_dev_dirs(tmp_state):
     from src.utils.state import get_subscriptions, sync_local_subscriptions
 
