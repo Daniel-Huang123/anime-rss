@@ -12,11 +12,11 @@ from src.scrapers.mikanani import (
 )
 from src.scrapers.yuc_wiki import get_season_list
 from src.utils.cover_cache import get_or_fetch_cover
-from src.utils.runtime_paths import APP_ROOT
+from src.utils.runtime_paths import PENDING_CHECKS_FILE
 from src.utils.season import quarter_to_ym
 from src.utils.state import add_subscription, get_subscriptions, remove_subscription
 
-_PENDING_FILE = APP_ROOT / ".pending_checks.json"
+_PENDING_FILE = PENDING_CHECKS_FILE
 
 
 def _load_pending() -> dict[str, list[str]]:

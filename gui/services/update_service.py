@@ -275,14 +275,23 @@ def _build_updater_ps1(pid: int, new_root: Path, install_dir: Path, work_dir: Pa
     等用户数据天然保留。
     """
     return f"""$ErrorActionPreference = 'SilentlyContinue'
+$log = Join-Path $env:TEMP 'zhuifanji_update.log'
+"[{{0}}] updater start pid={pid}" -f (Get-Date -Format o) | Out-File -FilePath $log -Encoding utf8
 $targetPid = {pid}
 while (Get-Process -Id $targetPid -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 400 }}
-Start-Sleep -Milliseconds 300
+Start-Sleep -Milliseconds 400
+"pid gone, robocopy" | Out-File -FilePath $log -Append -Encoding utf8
 $src = '{new_root}'
 $dst = '{install_dir}'
 robocopy $src $dst /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-Start-Process -FilePath (Join-Path $dst '{exe_name}') -WorkingDirectory $dst
-Start-Sleep -Milliseconds 500
+"robocopy exit=$LASTEXITCODE" | Out-File -FilePath $log -Append -Encoding utf8
+try {{
+    $restart = Start-Process -FilePath (Join-Path $dst '{exe_name}') -WorkingDirectory $dst -PassThru -ErrorAction Stop
+    "restarted pid=$($restart.Id), cleanup" | Out-File -FilePath $log -Append -Encoding utf8
+}} catch {{
+    "restart failed: $($_.Exception.Message)" | Out-File -FilePath $log -Append -Encoding utf8
+}}
+Start-Sleep -Milliseconds 600
 Remove-Item -LiteralPath '{work_dir}' -Recurse -Force -ErrorAction SilentlyContinue
 """
 
@@ -310,9 +319,14 @@ def prepare_update(zip_path: Path | str) -> dict:
 
 
 def launch_updater(ps1_path: Path | str) -> None:
-    """分离式启动 updater.ps1（无窗口、独立进程），随后调用方应立即退出 app。"""
-    DETACHED_PROCESS = 0x00000008
+    """后台无窗口启动 updater.ps1，随后调用方应立即退出 app。
+
+    实测必须用 CREATE_NO_WINDOW + 把 stdio 指向 DEVNULL：DETACHED_PROCESS 系列会让
+    powershell 拿不到有效标准句柄、根本不执行脚本（spawn 探针验证过）。CREATE_NO_WINDOW
+    的子进程在父进程(app)退出后仍存活（无 job 对象托管），足以完成替换+重启。
+    """
     CREATE_NO_WINDOW = 0x08000000
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
     subprocess.Popen(
         [
             "powershell",
@@ -324,6 +338,9 @@ def launch_updater(ps1_path: Path | str) -> None:
             "-File",
             str(ps1_path),
         ],
-        creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+        creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         close_fds=True,
     )

@@ -138,9 +138,11 @@ def test_build_updater_ps1_has_wait_copy_restart(tmp_path):
         4321, tmp_path / "new", tmp_path / "install", tmp_path / "work", "zhuifanji.exe"
     )
     assert "4321" in s
-    assert "robocopy" in s and "/E" in s   # 合并覆盖，不删用户数据
+    assert "robocopy" in s and "/E" in s
     assert "zhuifanji.exe" in s
-    assert "Get-Process" in s              # 等主程序退出
+    assert "Get-Process" in s
+    assert "zhuifanji_update.log" in s
+    assert "-PassThru" in s
 
 
 def test_find_build_root_and_exe_name(tmp_path):
