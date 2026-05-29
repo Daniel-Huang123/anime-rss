@@ -64,6 +64,41 @@ def test_add_subscription_update_existing(tmp_state):
     assert subs[0]["subgroup_name"] == "kirara"
 
 
+def test_update_subscription_cover_fills_empty_only(tmp_state):
+    from src.utils.state import (
+        add_subscription,
+        get_subscriptions,
+        update_subscription_cover,
+    )
+
+    # recovered_local 风格：缺 bangumi_id / cover_url
+    add_subscription("2026Q2", "番剧A", 0, 0, "local", "")
+
+    changed = update_subscription_cover(
+        "2026Q2", "番剧A", bangumi_id=777, cover_url="https://x/c.jpg"
+    )
+    assert changed is True
+
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["bangumi_id"] == 777
+    assert sub["cover_url"] == "https://x/c.jpg"
+
+    # 已有值时不覆盖，也不报改动
+    changed2 = update_subscription_cover(
+        "2026Q2", "番剧A", bangumi_id=888, cover_url="https://y/d.jpg"
+    )
+    assert changed2 is False
+    sub2 = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub2["bangumi_id"] == 777
+    assert sub2["cover_url"] == "https://x/c.jpg"
+
+
+def test_update_subscription_cover_missing_title_noop(tmp_state):
+    from src.utils.state import update_subscription_cover
+
+    assert update_subscription_cover("2026Q2", "不存在", bangumi_id=1) is False
+
+
 def test_get_quarters_to_cleanup(tmp_state, monkeypatch):
     from src.utils.state import add_subscription, get_quarters_to_cleanup
     import src.utils.season as season_module

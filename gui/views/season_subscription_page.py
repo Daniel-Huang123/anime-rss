@@ -4,7 +4,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
-from PyQt6.QtCore import QThreadPool, QTimer, Qt, QUrl
+from PyQt6.QtCore import QThreadPool, QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -49,6 +49,9 @@ def _quarter_label(q: str) -> str:
 
 
 class SeasonSubscriptionPage(QWidget):
+    # 订阅/取消订阅成功后发出，供媒体库重新解析封面
+    subscription_changed = pyqtSignal()
+
     def __init__(self, config: dict) -> None:
         super().__init__()
         self._cfg = config
@@ -569,6 +572,7 @@ class SeasonSubscriptionPage(QWidget):
                 from gui.services.subscription_service import remove_pending_check
                 remove_pending_check(self._dataset.quarter, item.title)
             self._render_cards()
+            self.subscription_changed.emit()
         else:
             if "未找到可用RSS" in msg:
                 self._failed_titles.add(item.title)

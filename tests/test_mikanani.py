@@ -119,6 +119,35 @@ def test_find_best_rss_no_resources():
     assert result is None
 
 
+def test_match_bangumi_id_via_season_index():
+    """bgm API 命中 → season_index 反查得到 bangumi_id。"""
+    from src.scrapers.mikanani import match_bangumi_id
+
+    season_index = {555: 1001}  # bgm_id → bangumi_id
+    with patch("src.scrapers.mikanani._bgm_canonical_names", return_value=([555], [])):
+        bid = match_bangumi_id("某番剧", season_index, "2026Q2")
+    assert bid == 1001
+
+
+def test_match_bangumi_id_title_fallback():
+    """bgm 不命中时退回季度标题反查（剥掉季号后缀）。"""
+    from src.scrapers.mikanani import match_bangumi_id
+
+    with patch("src.scrapers.mikanani._bgm_canonical_names", return_value=([], [])), \
+         patch("src.scrapers.mikanani.load_season_title_index", return_value={"某番剧": 2002}):
+        bid = match_bangumi_id("某番剧 第2季", {999: 1}, "2026Q2")
+    assert bid == 2002
+
+
+def test_match_bangumi_id_no_match_returns_none():
+    from src.scrapers.mikanani import match_bangumi_id
+
+    with patch("src.scrapers.mikanani._bgm_canonical_names", return_value=([42], [])), \
+         patch("src.scrapers.mikanani.load_season_title_index", return_value={}):
+        bid = match_bangumi_id("无关番", {555: 1001}, "2026Q2")
+    assert bid is None
+
+
 def test_build_rss_url():
     from src.scrapers.mikanani import build_rss_url
     url = build_rss_url(228, 562)

@@ -705,6 +705,23 @@ def build_season_index(
     return index
 
 
+def load_season_index_cached(
+    quarter: str, use_mirror: bool = False
+) -> "dict[int, int] | None":
+    """只读已缓存的 {bgm_id: bangumi_id} 季度索引；未缓存返回 None（不触发构建）。
+
+    供封面同步等「不想为此付一次 30-40s 冷构建」的场景复用：有缓存就借用，
+    没有就走更轻的单次搜索匹配，绝不抢着重建当季索引、拖慢订阅页加载。
+    """
+    cache_key = f"season_index:{quarter}:{'mirror' if use_mirror else 'main'}"
+    cached = _cache_get(cache_key)
+    if cached is None:
+        return None
+    if isinstance(cached, list):
+        return {int(k): int(v) for k, v in cached}
+    return cached
+
+
 def load_season_title_index(quarter: str, use_mirror: bool = False) -> "dict[str, int]":
     """返回 {归一化标题: bangumi_id}，由 build_season_index 构建时写入缓存。"""
     cache_key = f"season_index:{quarter}:{'mirror' if use_mirror else 'main'}:titles"
@@ -712,6 +729,39 @@ def load_season_title_index(quarter: str, use_mirror: bool = False) -> "dict[str
     if cached is None:
         return {}
     return {str(k): int(v) for k, v in cached}
+
+
+def match_bangumi_id(
+    title: str,
+    season_index: "dict[int, int]",
+    quarter: str = "",
+    use_mirror: bool = False,
+) -> "int | None":
+    """仅做「标题 → 蜜柑 bangumi_id」匹配，不解析 RSS（供封面同步复用）。
+
+    复用 resolve_anime_rss 的 season_index 命中逻辑，但省掉 find_best_rss：
+      ① bgm API 全名搜索 → bgm_id_list → season_index 反查
+      ② 季度标题反查索引兜底（剥掉「第X季/期」后缀）
+    命中返回 bangumi_id，否则 None。
+    """
+    if season_index:
+        bgm_id_list, _ = _bgm_canonical_names(title)
+        for bgm_id in bgm_id_list:
+            bid = season_index.get(bgm_id)
+            if bid:
+                return bid
+
+    if quarter:
+        title_idx = load_season_title_index(quarter, use_mirror)
+        if title_idx:
+            base_title = _re_mod.sub(
+                r"[\s　]*第[一二三四五六七八九十百\d]+[季期].*$", "", title
+            ).strip()
+            bid = title_idx.get(title) or title_idx.get(base_title)
+            if bid:
+                return bid
+
+    return None
 
 
 def build_yuc_bgm_map(

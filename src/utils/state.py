@@ -369,6 +369,37 @@ def add_subscription(
     return entry
 
 
+def update_subscription_cover(
+    quarter: str,
+    title: str,
+    bangumi_id: int | None = None,
+    cover_url: str | None = None,
+) -> bool:
+    """把封面同步发现的元数据写回已有订阅记录。
+
+    只在字段当前为空时补写（不覆盖用户/订阅流程已有的值），
+    返回是否产生改动。匹配按 title 精确比对（封面同步的标题来自本地媒体库，
+    与 recovered_local 记录的 title 一致）。
+    """
+    data = _load()
+    subs = data.get("subscriptions", {}).get(quarter, [])
+    target = str(title or "").strip()
+    changed = False
+    for item in subs:
+        if str(item.get("title", "")).strip() != target:
+            continue
+        if bangumi_id and int(item.get("bangumi_id") or 0) <= 0:
+            item["bangumi_id"] = int(bangumi_id)
+            changed = True
+        if cover_url and not str(item.get("cover_url") or "").strip():
+            item["cover_url"] = cover_url
+            changed = True
+        break
+    if changed:
+        _save(data)
+    return changed
+
+
 def remove_subscription(quarter: str, title: str) -> bool:
     """删除指定季度的某条订阅，返回是否找到并删除。"""
     data = _load()
