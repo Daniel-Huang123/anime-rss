@@ -63,6 +63,7 @@ class SeasonSubscriptionPage(QWidget):
         self._quarter_timer.start(10 * 60 * 1000)
         self._dataset: SeasonDataset | None = None
         self._failed_titles: set[str] = set()
+        self._cards_by_title: dict[str, list[CoverCard]] = {}
         self._active_workers: list[Worker] = []
         self._loading: bool = False
         self._current_quarter: str = self._initial_quarter()
@@ -346,25 +347,28 @@ class SeasonSubscriptionPage(QWidget):
     def _on_grid_loaded(self, dataset: SeasonDataset) -> None:
         self._dataset = dataset
         self._failed_titles.clear()
-        n_subbed = sum(1 for it in dataset.items if it.subscribed)
-        self.status_lbl.setText(
-            f"{dataset.quarter}  共 {len(dataset.items)} 部  ·  已订阅 {n_subbed} 部  ·  封面加载中..."
-        )
-        # Check pending notifications
         self._check_pending_notifications(dataset.quarter)
 
+        # 番单立即出（封面用已缓存的，未缓存先占位），不再等封面全抓完
+        self._finish_render()
+
+        n_subbed = sum(1 for it in dataset.items if it.subscribed)
         uncached = [it.cover_url for it in dataset.items if it.cover_url]
         if uncached:
+            self.status_lbl.setText(
+                f"{dataset.quarter}  共 {len(dataset.items)} 部  ·  已订阅 {n_subbed} 部  ·  封面加载中..."
+            )
             prefetch_worker = Worker(self._prefetch_covers_sync, uncached)
             self._active_workers.append(prefetch_worker)
             prefetch_worker.signals.error.connect(lambda _: None)
             prefetch_worker.signals.finished.connect(lambda w=prefetch_worker: (
-                self._finish_render(),
+                self._update_card_covers(),  # 封面已缓存，原地填图
+                self.status_lbl.setText(
+                    f"{dataset.quarter}  共 {len(dataset.items)} 部  ·  已订阅 {n_subbed} 部"
+                ),
                 self._active_workers.remove(w) if w in self._active_workers else None,
             ))
             self._thread_pool.start(prefetch_worker)
-        else:
-            self._finish_render()
 
         # 后台构建蜜柑索引（不阻塞网格交互）：完成后回填 bgm 链接并启用精准订阅
         self._start_index_build(dataset.quarter)
@@ -445,11 +449,25 @@ class SeasonSubscriptionPage(QWidget):
         return items
 
     def _clear_cards(self) -> None:
+        self._cards_by_title = {}
         while self.cards_vbox.count():
             child = self.cards_vbox.takeAt(0)
             w = child.widget()
             if w is not None:
                 w.deleteLater()
+
+    def _update_card_covers(self) -> None:
+        """预抓完成后原地填图，不重建卡片（避免闪烁/滚动复位）。"""
+        if not self._dataset:
+            return
+        url_by_title = {it.title: it.cover_url for it in self._dataset.items}
+        for title, cards in self._cards_by_title.items():
+            data = fetch_cover_bytes(url_by_title.get(title), allow_network=False)
+            if not data:
+                continue
+            pixmap = bytes_to_pixmap(data)
+            for card in cards:
+                card.set_cover_pixmap(pixmap)
 
     def _render_cards(self) -> None:
         self._clear_cards()
@@ -483,7 +501,8 @@ class SeasonSubscriptionPage(QWidget):
             grid.setContentsMargins(0, 4, 0, 8)
 
             for idx, it in enumerate(day_items):
-                cover = bytes_to_pixmap(fetch_cover_bytes(it.cover_url))
+                # 仅读缓存：番单立即出，未缓存封面先占位，预抓完成后原地填图
+                cover = bytes_to_pixmap(fetch_cover_bytes(it.cover_url, allow_network=False))
                 subtitle = f"{it.broadcast_time}\n{it.episodes}"
 
                 if it.title in self._failed_titles:
@@ -508,6 +527,7 @@ class SeasonSubscriptionPage(QWidget):
                     card.action_clicked.connect(partial(self._toggle_subscribe_async, it))
 
                 grid.addWidget(card, idx // cols, idx % cols)
+                self._cards_by_title.setdefault(it.title, []).append(card)
 
             self.cards_vbox.addWidget(section)
 

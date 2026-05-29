@@ -106,11 +106,11 @@ def _cover_lookup_key(title: str, bangumi_id: int | None, url: str | None) -> st
     return f"{_norm_title(title)}|{int(bangumi_id or 0)}|{str(url or '').strip()}"
 
 
-def fetch_cover_bytes(url: str | None) -> bytes | None:
+def fetch_cover_bytes(url: str | None, allow_network: bool = True) -> bytes | None:
     data = _fetch_cover_bytes_cached(url)
     if data:
         return data
-    if not url:
+    if not url or not allow_network:
         return None
 
     COVER_CACHE_DIR.mkdir(exist_ok=True)
