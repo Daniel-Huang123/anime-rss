@@ -30,7 +30,9 @@ from gui.services.cover_service import bytes_to_pixmap, fetch_cover_bytes
 from gui.services.subscription_service import (
     SeasonAnimeItem,
     SeasonDataset,
-    build_season_dataset,
+    apply_bgm_map,
+    build_season_grid,
+    build_season_index_and_map,
     clear_season_caches,
     subscribe_title,
     unsubscribe_title,
@@ -330,9 +332,10 @@ class SeasonSubscriptionPage(QWidget):
         self.notif_frame.setVisible(False)
         self._start_loading_ui()
         self.status_lbl.setText(f"正在加载 {quarter} 番单...")
-        worker = Worker(build_season_dataset, self._cfg, quarter)
+        # 快路径：只抓 yuc.wiki 番单即可渲染网格；蜜柑索引随后后台构建
+        worker = Worker(build_season_grid, self._cfg, quarter)
         self._active_workers.append(worker)
-        worker.signals.result.connect(self._on_dataset_loaded)
+        worker.signals.result.connect(self._on_grid_loaded)
         worker.signals.error.connect(self._on_error)
         worker.signals.finished.connect(lambda w=worker: (
             self._set_busy(False),
@@ -340,7 +343,7 @@ class SeasonSubscriptionPage(QWidget):
         ))
         self._thread_pool.start(worker)
 
-    def _on_dataset_loaded(self, dataset: SeasonDataset) -> None:
+    def _on_grid_loaded(self, dataset: SeasonDataset) -> None:
         self._dataset = dataset
         self._failed_titles.clear()
         n_subbed = sum(1 for it in dataset.items if it.subscribed)
@@ -362,6 +365,34 @@ class SeasonSubscriptionPage(QWidget):
             self._thread_pool.start(prefetch_worker)
         else:
             self._finish_render()
+
+        # 后台构建蜜柑索引（不阻塞网格交互）：完成后回填 bgm 链接并启用精准订阅
+        self._start_index_build(dataset.quarter)
+
+    def _start_index_build(self, quarter: str) -> None:
+        idx_worker = Worker(build_season_index_and_map, self._cfg, quarter)
+        self._active_workers.append(idx_worker)
+        idx_worker.signals.result.connect(partial(self._on_index_ready, quarter))
+        idx_worker.signals.error.connect(lambda _: None)  # 索引失败不影响网格
+        idx_worker.signals.finished.connect(lambda w=idx_worker: (
+            self._active_workers.remove(w) if w in self._active_workers else None,
+        ))
+        self._thread_pool.start(idx_worker)
+
+    def _on_index_ready(self, quarter: str, result: tuple[dict[int, int], dict[str, int]]) -> None:
+        # 用户可能已切换季度——只回填仍匹配的 dataset
+        if not self._dataset or self._dataset.quarter != quarter:
+            return
+        season_index, yuc_bgm_map = result
+        self._dataset.season_index = season_index
+        self._dataset.yuc_bgm_map = yuc_bgm_map
+        apply_bgm_map(self._dataset, yuc_bgm_map)
+        # 轻量重渲染：封面已缓存，主要为让卡片封面点击跳转 bgm 链接生效
+        self._render_cards()
+        n_subbed = sum(1 for it in self._dataset.items if it.subscribed)
+        self.status_lbl.setText(
+            f"{self._dataset.quarter}  共 {len(self._dataset.items)} 部  ·  已订阅 {n_subbed} 部  ·  索引就绪"
+        )
 
     def _check_pending_notifications(self, quarter: str) -> None:
         from gui.services.subscription_service import get_pending_checks

@@ -635,73 +635,93 @@ def build_season_index(
     if not bangumi_ids:
         return {}
 
-    # Step 2: 并行 fetch 所有番剧页，提取 bgm_id
-    # 用共享 requests.Session（连接池复用）+ 20 workers，比 scrapling 快 3-5x
+    # Step 2: 并行 fetch 所有番剧页，提取 bgm_id（标题已从季度页 HTML 直接拿到，省去半数请求）
     from concurrent.futures import ThreadPoolExecutor
     import requests as _req_lib
+    from requests.adapters import HTTPAdapter
+    from html import unescape as _unescape
 
-    index: dict[int, int] = {}   # bgm_id → bangumi_id
+    # 蜜柑对单 IP 高并发会限速/丢连接（实测 32 并发会触发 read timeout），
+    # 且服务端本身近乎串行处理；16 并发是兼顾吞吐与稳定的折中。
+    _WORKERS = 16
 
+    index: dict[int, int] = {}        # bgm_id → bangumi_id
+    title_index: dict[str, int] = {}  # 归一化标题 → bangumi_id（反查用）
+
+    # ── 标题反查索引：直接解析季度页 HTML，零额外请求 ──
+    # 季度页锚点形如：<a class="an-text" href="/Home/Bangumi/3884" target="_blank" title="番剧名">
+    for _bid_str, _raw_title in _re_mod.findall(
+        r'/Home/Bangumi/(\d+)"[^>]*?\btitle="([^"]*)"', html
+    ):
+        mikan_title = _unescape(_raw_title).strip()
+        if not mikan_title:
+            continue
+        bid = int(_bid_str)
+        base_title = _re_mod.sub(
+            r"[\s　]*第[一二三四五六七八九十百\d]+[季期]$", "", mikan_title
+        ).strip()
+        if base_title:
+            title_index.setdefault(base_title, bid)
+        title_index[mikan_title] = bid
+
+    # 共享 Session：连接池上限对齐 worker 数，避免高并发下连接持续丢弃/重建
     _sess = _req_lib.Session()
     _sess.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": f"{base}/",
     })
+    _adapter = HTTPAdapter(pool_connections=_WORKERS, pool_maxsize=_WORKERS, max_retries=1)
+    _sess.mount("https://", _adapter)
+    _sess.mount("http://", _adapter)
 
-    title_index: dict[str, int] = {}   # 归一化标题 → bangumi_id（反查用）
-    from html import unescape as _unescape
+    def _fetch_bgm_id(bid: int) -> "tuple[int, int | None, list | None]":
+        """抓一次详情页：同时提取 bgm_id 和字幕组。
 
-    def _fetch_bgm_id(bid: int) -> "tuple[int, int | None]":
+        返回 (bid, bgm_id, subgroups)；subgroups 为 None 表示走了缓存或抓取失败、
+        无需回写（缓存写入统一在主线程批量进行，避免多线程并发写同一文件）。
+        """
         ck = f"bangumi_data:{bid}:{'mirror' if use_mirror else 'main'}"
         cached_b = _cache_get(ck)
         if cached_b is not None and "bgm_id" in cached_b:
-            return bid, cached_b.get("bgm_id")
+            return bid, cached_b.get("bgm_id"), None
         try:
-            r = _sess.get(f"{base}/Home/Bangumi/{bid}", timeout=10)
+            r = _sess.get(f"{base}/Home/Bangumi/{bid}", timeout=15)
             if r.ok:
                 m = _re_mod.search(r"bgm\.tv/subject/(\d+)", r.text)
-                return bid, int(m.group(1)) if m else None
+                bgm_id = int(m.group(1)) if m else None
+                # 顺带解析字幕组，供后续「订阅」复用（结构对齐 _fetch_bangumi_data）
+                try:
+                    from scrapling.parser import Adaptor
+                    subgroups = _parse_subgroups(Adaptor(r.text, url=r.url))
+                except Exception:
+                    subgroups = []
+                return bid, bgm_id, subgroups
         except Exception as exc:
             logger.debug("fetch bgm_id bangumi=%d 失败: %s", bid, exc)
-        return bid, None
+        return bid, None, None
 
-    def _fetch_title(bid: int) -> "tuple[int, str]":
-        """始终 fetch 页面提取标题（不走缓存，缓存里没有 title 字段）。"""
-        try:
-            r = _sess.get(f"{base}/Home/Bangumi/{bid}", timeout=10)
-            if r.ok:
-                m = (_re_mod.search(r'<title>\s*Mikan Project\s*-\s*([^<]+?)\s*</title>', r.text)
-                     or _re_mod.search(r'class="bangumi-title[^"]*"[^>]*>([^<]+?)<', r.text))
-                if m:
-                    return bid, _unescape(m.group(1).strip())
-        except Exception as exc:
-            logger.debug("fetch title bangumi=%d 失败: %s", bid, exc)
-        return bid, ""
-
-    # Step 2a: 并行提取 bgm_id（优先走磁盘缓存，快）
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        for bid, bgm_id in pool.map(_fetch_bgm_id, bangumi_ids):
+    # 并行提取 bgm_id（命中缓存的直接返回）；新抓到的字幕组累积到主线程，循环后批量写
+    fresh: dict[int, dict] = {}   # bid → {"subgroups": [...], "bgm_id": ...}
+    with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
+        for bid, bgm_id, subgroups in pool.map(_fetch_bgm_id, bangumi_ids):
             if bgm_id is not None:
                 index[bgm_id] = bid
-
-    # Step 2b: 并行提取蜜柑标题（始终 fetch，用于标题反查）
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        for bid, mikan_title in pool.map(_fetch_title, bangumi_ids):
-            if mikan_title:
-                base_title = _re_mod.sub(
-                    r"[\s　]*第[一二三四五六七八九十百\d]+[季期]$", "", mikan_title
-                ).strip()
-                if base_title:
-                    title_index[base_title] = bid
-                title_index[mikan_title] = bid
+            if subgroups:  # 非空才回写（与原 _fetch_bangumi_data 行为一致）
+                fresh[bid] = {"subgroups": subgroups, "bgm_id": bgm_id}
 
     _sess.close()
-    logger.info("索引构建完成：bgm=%d条 标题=%d条（共%d番）",
-                len(index), len(title_index), len(bangumi_ids))
+    logger.info("索引构建完成：bgm=%d条 标题=%d条（共%d番，新抓%d番）",
+                len(index), len(title_index), len(bangumi_ids), len(fresh))
 
-    # 缓存 bgm_id 索引 + 标题反查索引
-    _cache_set(cache_key, [[k, v] for k, v in index.items()])
-    _cache_set(cache_key + ":titles", [[k, v] for k, v in title_index.items()])
+    # 批量写缓存：一次读-改-写，避免线程内并发写文件导致丢失/损坏
+    data = _load_cache()
+    ts = time.time()
+    suffix = "mirror" if use_mirror else "main"
+    for bid, val in fresh.items():
+        data[f"bangumi_data:{bid}:{suffix}"] = {"ts": ts, "value": val}
+    data[cache_key] = {"ts": ts, "value": [[k, v] for k, v in index.items()]}
+    data[cache_key + ":titles"] = {"ts": ts, "value": [[k, v] for k, v in title_index.items()]}
+    _save_cache(data)
     return index
 
 
@@ -820,7 +840,7 @@ def build_yuc_bgm_map(
                     return title, bgm_id
             return title, None
 
-        with _TPE(max_workers=5) as pool:
+        with _TPE(max_workers=10) as pool:
             for title, bgm_id in pool.map(_match, unmatched):
                 if bgm_id:
                     result[title] = bgm_id
