@@ -9,7 +9,7 @@ import requests
 from src.utils.runtime_paths import APP_ROOT
 
 REPO_OWNER = "Daniel-Huang123"
-REPO_NAME = "zhuifanji"
+REPO_NAME = "anime-season-rss"
 REPO_NAME_FALLBACK = "anime-rss"
 
 

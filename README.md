@@ -1,4 +1,6 @@
-# 🎌 追番姬 zhuifanji
+# 🎌 anime-season-rss · 追番姬 zhuifanji
+
+> Seasonal anime → RSS → qBittorrent, on desktop. Browse the season, one-click subscribe, auto-download, track what you've watched.
 
 每季度初从 [yuc.wiki](https://yuc.wiki) 抓取当季番单 → 双路匹配蜜柑计划 RSS → 按字幕组优先级自动添加到本地 qBittorrent，附带媒体库与播放进度追踪。
 
@@ -98,7 +100,7 @@ uv run python gui_main.py
 
 **配置步骤**：
 
-1. 下载安装 [PotPlayer](https://potplayer.daum.net/)（64位）
+1. 下载安装 [PotPlayer](https://potplayer.tv/)（64位）
 2. 在 PotPlayer 中：**选项 → 播放 → 播放列表 → 保存最近播放记录** 勾选
 3. 本应用会自动读取 PotPlayer 标准播放列表历史：`%APPDATA%\PotPlayerMini64\Playlist\PotPlayerMini64.dpl`
 4. 如果从媒体库页面点击剧集播放，应用会同步写入运行目录的 `watch_history.json`

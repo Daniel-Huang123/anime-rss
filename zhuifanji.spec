@@ -11,6 +11,7 @@ _markupbase_file = _mb_mod.__file__
 
 datas = [
     ('config.example.yaml', '.'),
+    ('docs/images', 'docs/images'),  # onboarding 指引页截图
     (_html_dir, 'html'),
     (_markupbase_file, '.'),
 ]

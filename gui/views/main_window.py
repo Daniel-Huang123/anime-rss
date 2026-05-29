@@ -102,8 +102,8 @@ class MainWindow(QMainWindow):
         self._cfg = cfg
         # Apply theme change immediately
         if self._app:
-            from gui.themes import apply as apply_theme
-            apply_theme(self._app, cfg.get("ui", {}).get("theme", "night"))
+            from gui.themes import apply as apply_theme, DEFAULT_THEME
+            apply_theme(self._app, cfg.get("ui", {}).get("theme", DEFAULT_THEME))
 
         for page in (self.dashboard_page, self.season_sub_page, self.sub_manage_page,
                      self.cleanup_page, self.media_page):

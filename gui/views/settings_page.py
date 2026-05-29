@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -90,7 +91,16 @@ class SettingsPage(QWidget):
         self.save_path_edit = QLineEdit()
         self.save_path_edit.setPlaceholderText("例如：D:/Anime")
         self.save_path_edit.setToolTip("番剧下载根目录，同时也是媒体库扫描根目录")
-        qbt_form.addRow(QLabel("下载保存路径"), self.save_path_edit)
+        save_path_row = QHBoxLayout()
+        save_path_row.setContentsMargins(0, 0, 0, 0)
+        save_path_row.addWidget(self.save_path_edit, stretch=1)
+        browse_btn = QPushButton("📂 浏览")
+        browse_btn.setToolTip("选择下载保存文件夹")
+        browse_btn.clicked.connect(self._browse_save_path)
+        save_path_row.addWidget(browse_btn)
+        save_path_wrap = QWidget()
+        save_path_wrap.setLayout(save_path_row)
+        qbt_form.addRow(QLabel("下载保存路径"), save_path_wrap)
         root.addWidget(qbt_group)
 
         test_row = QHBoxLayout()
@@ -184,6 +194,12 @@ class SettingsPage(QWidget):
         self.request_delay_spin.setValue(float(self._cfg.get("advanced", {}).get("request_delay", 1.0)))
         self.auto_refresh_check.setChecked(bool(ui.get("auto_refresh_enabled", False)))
         self.auto_refresh_seconds.setValue(int(ui.get("auto_refresh_seconds", 30)))
+
+    def _browse_save_path(self) -> None:
+        start = self.save_path_edit.text().strip().strip('"').strip("'")
+        path = QFileDialog.getExistingDirectory(self, "选择下载保存文件夹", start or "")
+        if path:
+            self.save_path_edit.setText(path.replace("/", "\\"))
 
     def _test_connection(self) -> None:
         self.test_status_lbl.setText("连接中...")
