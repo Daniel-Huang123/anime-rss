@@ -189,6 +189,8 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
 
     fallback_quarter = current_quarter()
     discovered: set[tuple[str, str]] = set()
+    from collections import Counter
+    sg_counts: dict[tuple[str, str], Counter] = {}
 
     try:
         for file_path in root.rglob("*"):
@@ -205,6 +207,7 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
             if any((name.startswith(".") or name in _SKIP_SEGMENTS) for name in segment_names):
                 continue
 
+            parsed = parse_filename(file_path)
             quarter = fallback_quarter
             title = ""
             if len(parts) >= 2 and _QUARTER_RE.match(parts[0]):
@@ -213,7 +216,6 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
             elif len(parts) >= 2:
                 title = parts[0].strip()
             else:
-                parsed = parse_filename(file_path)
                 if parsed:
                     title = parsed.title.strip()
                 else:
@@ -222,12 +224,17 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
             if not title:
                 continue
             discovered.add((quarter, title))
+            sg = str(getattr(parsed, "subgroup", "") or "").strip() if parsed else ""
+            if sg:
+                sg_counts.setdefault((quarter, title), Counter())[sg] += 1
     except PermissionError:
         pass
 
-    added = _apply_discovered_subscriptions(data, existing, discovered)
+    subgroups = {key: c.most_common(1)[0][0] for key, c in sg_counts.items()}
+    added = _apply_discovered_subscriptions(data, existing, discovered, subgroups)
+    backfilled = _backfill_local_subgroups(data, subgroups)
 
-    if added or pruned:
+    if added or pruned or backfilled:
         _save(data)
     return added
 

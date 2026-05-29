@@ -224,6 +224,24 @@ def test_enrich_recovered_subscriptions_from_rules_by_title_fallback(tmp_state):
     assert sub["bangumi_id"] == 222
 
 
+def test_sync_local_subscriptions_detects_subgroup_from_filenames(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    root = tmp_path / "media"
+    (root / "2026Q2" / "番剧Z").mkdir(parents=True, exist_ok=True)
+    (root / "2026Q2" / "番剧Z" / "[ANi] 番剧Z - 01 [1080P].mkv").write_bytes(b"x")
+    (root / "2026Q2" / "番剧Z" / "[ANi] 番剧Z - 02 [1080P].mkv").write_bytes(b"x")
+
+    added = sync_local_subscriptions(root)
+    assert added == 1
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["title"] == "番剧Z"
+    assert sub["subgroup_name"] == "ANi"
+
+
 def test_sync_from_folders_detects_subgroup(tmp_state, tmp_path, monkeypatch):
     from src.utils.state import get_subscriptions, sync_local_subscriptions_from_folders
     from src.utils.file_parser import AnimeFolder, ParsedAnime

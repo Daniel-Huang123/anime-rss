@@ -30,6 +30,11 @@ class SubscriptionManagementPage(QWidget):
         self._cfg = config
         self.refresh()
 
+    def showEvent(self, event) -> None:
+        # 每次切到本页都重读 state，反映媒体库同步刚补上的字幕组/封面元数据
+        super().showEvent(event)
+        self.refresh()
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
