@@ -1,10 +1,11 @@
 @echo off
 setlocal
 
-REM 先确保已安装 pyinstaller：
-REM uv add --dev pyinstaller
+REM Use uv-managed environment for deterministic builds.
+REM First-time setup:
+REM   uv sync --group dev --group gui
 
-pyinstaller --noconfirm --clean zhuifanji.spec
+uv run pyinstaller --noconfirm --clean zhuifanji.spec
 
 echo.
 echo Build completed. Output: dist\zhuifanji\zhuifanji.exe

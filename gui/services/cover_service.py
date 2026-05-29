@@ -3,15 +3,17 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
 
 from src.utils.cover_cache import get_cover_path, get_or_fetch_cover
 from src.utils.file_parser import AnimeFolder
 from src.utils.runtime_paths import COVER_CACHE_DIR
 from src.utils.state import get_all_subscriptions_flat
+
+if TYPE_CHECKING:
+    from PyQt6.QtGui import QPixmap
 
 _MEMO: dict[str, bytes] = {}
 _MISS_KEYS: set[str] = set()
@@ -179,7 +181,10 @@ def batch_folder_cover_bytes(
     return result
 
 
-def bytes_to_pixmap(data: bytes | None, width: int = 140, height: int = 196) -> QPixmap:
+def bytes_to_pixmap(data: bytes | None, width: int = 140, height: int = 196) -> "QPixmap":
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QPixmap
+
     if data:
         pix = QPixmap()
         pix.loadFromData(data)
