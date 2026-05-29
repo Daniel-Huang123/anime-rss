@@ -216,6 +216,15 @@ class QBTClient:
             logger.error("获取 RSS 列表失败：%s", e)
             return {}
 
+    def list_rss_rules(self) -> dict:
+        """Return RSS auto-downloading rules."""
+        try:
+            with self._client() as c:
+                return c.rss_rules()
+        except Exception as e:
+            logger.error("鑾峰彇 RSS 瑙勫垯澶辫触锛?s", e)
+            return {}
+
     def remove_rss_folder(self, folder: str) -> tuple[bool, str]:
         """删除整个 RSS 文件夹（季度清理时用）。"""
         try:

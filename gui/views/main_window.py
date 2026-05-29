@@ -17,7 +17,6 @@ from gui.services.config_service import ConfigService
 from gui.services.update_service import check_latest_release
 from gui.views.dashboard_page import DashboardPage
 from gui.views.media_library_page import MediaLibraryPage
-from gui.views.onboarding_dialog import OnboardingDialog
 from gui.views.quarter_cleanup_page import QuarterCleanupPage
 from gui.views.season_subscription_page import SeasonSubscriptionPage
 from gui.views.settings_page import SettingsPage
@@ -40,11 +39,12 @@ class MainWindow(QMainWindow):
         self._thread_pool = QThreadPool.globalInstance()
         self._active_workers: list[Worker] = []
         self._release_url: str = ""
-        self.setWindowTitle("🎌 追番姬")
+        self.setWindowTitle("追番姬")
+        if self._app is not None:
+            self.setWindowIcon(self._app.windowIcon())
         self.resize(1280, 800)
         self._cfg = ConfigService.load()
         self._build_ui()
-        QTimer.singleShot(200, self._maybe_show_onboarding)
         QTimer.singleShot(900, self._check_update_async)
 
     def _build_ui(self) -> None:
@@ -89,14 +89,6 @@ class MainWindow(QMainWindow):
         self._update_notice.linkActivated.connect(self._open_release_page)
         self._update_notice.setVisible(False)
         self.statusBar().addPermanentWidget(self._update_notice)
-
-    def _maybe_show_onboarding(self) -> None:
-        save_path = self._cfg.get("qbittorrent", {}).get("save_path", "").strip()
-        if save_path:
-            return
-        dlg = OnboardingDialog(self)
-        if dlg.exec():
-            self._on_config_saved(dlg.saved_config())
 
     def _on_config_saved(self, cfg: dict) -> None:
         self._cfg = cfg

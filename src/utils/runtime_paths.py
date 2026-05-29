@@ -24,6 +24,39 @@ def app_root() -> Path:
 
 APP_ROOT = app_root()
 
+
+def _resource_roots() -> list[Path]:
+    """Possible resource roots for dev mode and PyInstaller one-dir mode."""
+    roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        roots.append(Path(meipass))
+
+    internal = APP_ROOT / "_internal"
+    if internal.exists():
+        roots.append(internal)
+
+    roots.append(APP_ROOT)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(root)
+    return deduped
+
+
+def find_resource(*parts: str) -> Path | None:
+    """Return the first existing resource path across known roots."""
+    for root in _resource_roots():
+        candidate = root.joinpath(*parts)
+        if candidate.exists():
+            return candidate
+    return None
+
 CONFIG_FILE = APP_ROOT / "config.yaml"
 STATE_FILE = APP_ROOT / "state.json"
 WATCH_HISTORY_FILE = APP_ROOT / "watch_history.json"

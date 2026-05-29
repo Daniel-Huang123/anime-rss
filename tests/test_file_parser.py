@@ -139,3 +139,19 @@ def test_parse_filename_strips_quality_tags():
     assert "1080P" not in r.title
     assert "x265" not in r.title
     assert "CHAS" not in r.title
+
+
+def test_scan_skips_dev_dirs(tmp_path):
+    """扫描应跳过 .venv/.git 等开发目录。"""
+    dev_dir = tmp_path / ".venv" / "lib"
+    dev_dir.mkdir(parents=True, exist_ok=True)
+    (dev_dir / "junk.ts").write_bytes(b"x" * 100)
+
+    anime_dir = tmp_path / "2026Q2" / "测试番剧"
+    anime_dir.mkdir(parents=True, exist_ok=True)
+    (anime_dir / "01.mkv").write_bytes(b"x" * 100)
+
+    folders = scan_media_directory(tmp_path)
+    titles = {f.title for f in folders}
+    assert "测试番剧" in titles
+    assert ".venv" not in titles
