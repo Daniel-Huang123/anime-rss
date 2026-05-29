@@ -63,6 +63,8 @@ class SeasonSubscriptionPage(QWidget):
         self._quarter_timer.start(10 * 60 * 1000)
         self._dataset: SeasonDataset | None = None
         self._failed_titles: set[str] = set()
+        self._grid_rendered: bool = False
+        self._silent_load: bool = False
         self._active_workers: list[Worker] = []
         self._loading: bool = False
         self._current_quarter: str = self._initial_quarter()
@@ -79,6 +81,14 @@ class SeasonSubscriptionPage(QWidget):
         self._load_est_ms = 38000  # 首次未缓存约 30-40s，命中缓存会提前结束
         self._build_ui()
         self._rebuild_quarter_menu()  # also refreshes button text + current-season button state
+        # 启动即后台预加载番单，不必等用户点进本页才开始（失败静默，访问时再报错）
+        QTimer.singleShot(0, self._preload)
+
+    def _preload(self) -> None:
+        if self._dataset is not None or self._loading:
+            return
+        self._silent_load = True
+        self.refresh_async()
 
     def apply_config(self, config: dict) -> None:
         self._cfg = config
@@ -278,6 +288,7 @@ class SeasonSubscriptionPage(QWidget):
     def _start_loading_ui(self) -> None:
         """清屏并展示「追番姬加载中」提示 + 进度条。"""
         self._clear_cards()
+        self._grid_rendered = False
         self._load_elapsed_ms = 0
         self.loading_bar.setValue(0)
         self.loading_eta.setText(
@@ -344,6 +355,7 @@ class SeasonSubscriptionPage(QWidget):
         self._thread_pool.start(worker)
 
     def _on_grid_loaded(self, dataset: SeasonDataset) -> None:
+        self._silent_load = False  # 加载成功，后续失败正常弹窗
         self._dataset = dataset
         self._failed_titles.clear()
         n_subbed = sum(1 for it in dataset.items if it.subscribed)
@@ -387,6 +399,10 @@ class SeasonSubscriptionPage(QWidget):
         self._dataset.season_index = season_index
         self._dataset.yuc_bgm_map = yuc_bgm_map
         apply_bgm_map(self._dataset, yuc_bgm_map)
+        # 首屏（封面预抓）还没渲染完时，不要抢先出网格——bgm_map 已写入 dataset，
+        # 交给 _finish_render 一次性渲染（否则会出现"番单已出但加载条还在"）。
+        if not self._grid_rendered:
+            return
         # 轻量重渲染：封面已缓存，主要为让卡片封面点击跳转 bgm 链接生效
         self._render_cards()
         n_subbed = sum(1 for it in self._dataset.items if it.subscribed)
@@ -420,12 +436,18 @@ class SeasonSubscriptionPage(QWidget):
             f"{self._dataset.quarter}  共 {len(self._dataset.items)} 部  ·  已订阅 {n_subbed} 部"
         )
         self._render_cards()
+        self._grid_rendered = True
 
     def _on_error(self, text: str) -> None:
         self._stop_loading_ui()
+        self._set_busy(False)
+        if self._silent_load:
+            # 启动预加载失败：不打扰，留待用户进入本页时再加载/报错
+            self._silent_load = False
+            self.status_lbl.setText("番单待加载（点开本页或「重新加载」重试）")
+            return
         QMessageBox.critical(self, "加载失败", text)
         self.status_lbl.setText("加载失败")
-        self._set_busy(False)
 
     # ── 卡片渲染 ──────────────────────────────────────────────
 
