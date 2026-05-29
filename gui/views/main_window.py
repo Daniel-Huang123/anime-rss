@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QThreadPool, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -10,7 +12,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from gui.qt.workers import Worker
 from gui.services.config_service import ConfigService
+from gui.services.update_service import check_latest_release
 from gui.views.dashboard_page import DashboardPage
 from gui.views.media_library_page import MediaLibraryPage
 from gui.views.onboarding_dialog import OnboardingDialog
@@ -33,11 +37,15 @@ class MainWindow(QMainWindow):
     def __init__(self, app=None) -> None:
         super().__init__()
         self._app = app
-        self.setWindowTitle("🎌 番剧自动订阅管理")
+        self._thread_pool = QThreadPool.globalInstance()
+        self._active_workers: list[Worker] = []
+        self._release_url: str = ""
+        self.setWindowTitle("🎌 追番姬")
         self.resize(1280, 800)
         self._cfg = ConfigService.load()
         self._build_ui()
         QTimer.singleShot(200, self._maybe_show_onboarding)
+        QTimer.singleShot(900, self._check_update_async)
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -75,6 +83,13 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
 
+        self._update_notice = QLabel("")
+        self._update_notice.setTextFormat(Qt.TextFormat.RichText)
+        self._update_notice.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self._update_notice.linkActivated.connect(self._open_release_page)
+        self._update_notice.setVisible(False)
+        self.statusBar().addPermanentWidget(self._update_notice)
+
     def _maybe_show_onboarding(self) -> None:
         save_path = self._cfg.get("qbittorrent", {}).get("save_path", "").strip()
         if save_path:
@@ -95,3 +110,34 @@ class MainWindow(QMainWindow):
             page.apply_config(cfg)
         self.dashboard_page.refresh()
         self.media_page.refresh_async()
+
+    def _check_update_async(self) -> None:
+        worker = Worker(check_latest_release)
+        self._active_workers.append(worker)
+        worker.signals.result.connect(self._on_update_check_done)
+        worker.signals.finished.connect(lambda w=worker: (
+            self._active_workers.remove(w) if w in self._active_workers else None,
+        ))
+        self._thread_pool.start(worker)
+
+    def _on_update_check_done(self, result: dict) -> None:
+        if not isinstance(result, dict) or not result.get("ok"):
+            return
+        if not result.get("has_update"):
+            self._update_notice.setVisible(False)
+            return
+
+        latest = str(result.get("latest_version", "")).strip()
+        current = str(result.get("current_version", "")).strip()
+        self._release_url = str(result.get("url", "")).strip()
+        if not self._release_url:
+            return
+        self._update_notice.setText(
+            f'<a href="{self._release_url}" style="color:#cf1f1f;text-decoration:none;">'
+            f"● 发现新版本 {latest}（当前 {current}），点击前往下载</a>"
+        )
+        self._update_notice.setVisible(True)
+
+    def _open_release_page(self, _: str) -> None:
+        if self._release_url:
+            QDesktopServices.openUrl(QUrl(self._release_url))

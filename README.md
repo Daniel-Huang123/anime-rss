@@ -1,4 +1,4 @@
-# 🎌 番剧自动订阅管理
+# 🎌 追番姬 zhuifanji
 
 每季度初从 [yuc.wiki](https://yuc.wiki) 抓取当季番单 → 双路匹配蜜柑计划 RSS → 按字幕组优先级自动添加到本地 qBittorrent，附带媒体库与播放进度追踪。
 
@@ -50,11 +50,12 @@ advanced:
 
 ### 3. 启动
 
-```bash
-uv run streamlit run app.py
-```
+桌面 GUI（推荐）：
 
-浏览器访问 `http://localhost:8501`
+```bash
+uv sync --group gui
+uv run python gui_main.py
+```
 
 ---
 
@@ -140,7 +141,7 @@ uv sync
 build_exe.bat
 ```
 
-输出目录：`dist/anime-rss/anime-rss.exe`
+输出目录：`dist/zhuifanji/zhuifanji.exe`
 
 ### 3. 运行与数据目录说明
 
@@ -150,9 +151,9 @@ build_exe.bat
 
 ---
 
-## 原生 GUI（迁移中）
+## 桌面 GUI（PyQt6）
 
-已提供 `PySide6` 迁移版（`gui/`），当前已覆盖：
+PyQt6 原生桌面版（`gui/`），已覆盖以下页面：
 - `Dashboard`：季度概览、当前订阅、最近更新媒体
 - `Season Subscribe`：季度番单、封面展示、点击封面跳转 BGM、订阅/取消订阅
 - `Subscription Manage`：订阅列表与按季度删除
@@ -164,8 +165,10 @@ build_exe.bat
 
 ```bash
 uv sync --group gui
-uv run python -m gui.main
+uv run python gui_main.py
 ```
+
+> 已切换为 PyQt6 打包链路（`zhuifanji.spec` + `gui_main.py`），发布版可双击运行，无需安装 Python / uv。
 
 ---
 
@@ -176,6 +179,15 @@ uv run python -m gui.main
 - `刷新间隔（秒）`
 
 开启后，主页与业务页面会自动按间隔刷新（适合边下载边看状态）。
+
+---
+
+## 中文新手教程（Wiki 草稿）
+
+为 Phase 0 提供的中文小白教程草稿见：
+- `docs/wiki/新手教程.md`
+
+可直接复制到 GitHub Wiki 并补充截图标注。
 
 ---
 

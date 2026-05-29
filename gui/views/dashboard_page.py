@@ -82,7 +82,7 @@ class DashboardPage(QWidget):
 
         # 标题栏
         title_row = QHBoxLayout()
-        title_lbl = QLabel("🎌  番剧自动订阅管理")
+        title_lbl = QLabel("🎌  追番姬")
         title_lbl.setObjectName("page-title")
         title_row.addWidget(title_lbl)
         title_row.addStretch(1)

@@ -14,7 +14,7 @@ def _project_root() -> Path:
 def app_root() -> Path:
     """
     返回运行根目录：
-    - 开发态：项目根目录（包含 app.py）
+    - 开发态：项目根目录（包含 gui_main.py）
     - PyInstaller 冻结态：exe 所在目录（便于配置和状态持久化）
     """
     if getattr(sys, "frozen", False):
@@ -32,4 +32,3 @@ POTPLAYER_LOG_FILE = APP_ROOT / "potplayer_plays.txt"
 COVER_CACHE_DIR = APP_ROOT / ".cover_cache"
 ASSETS_COVERS_DIR = APP_ROOT / "assets" / "covers"
 MIKAN_CACHE_FILE = APP_ROOT / ".mikan_cache.json"
-

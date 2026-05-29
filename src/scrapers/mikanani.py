@@ -524,7 +524,7 @@ def _bgm_canonical_names(title: str) -> "tuple[list[int], list[str]]":
     """
     try:
         from urllib.parse import quote as _quote
-        _hdrs = {"User-Agent": "anime-rss/1.0", "Accept": "application/json"}
+        _hdrs = {"User-Agent": "zhuifanji/1.0", "Accept": "application/json"}
 
         # 旧版 API：排序与网站一致，能正确区分多季
         resp = _requests.get(

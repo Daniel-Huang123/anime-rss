@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
@@ -56,6 +57,15 @@ class QBTClient:
                 pass
 
     # ── 连接 ──────────────────────────────────────────────
+
+    @staticmethod
+    def is_webui_port_open(host: str, port: int, timeout: float = 0.8) -> bool:
+        """仅探测 TCP 端口是否可达（不校验账号密码）。"""
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout):
+                return True
+        except Exception:
+            return False
 
     def test_connection(self) -> tuple[bool, str]:
         """测试连接，返回 (成功, 消息)。"""
