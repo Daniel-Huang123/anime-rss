@@ -65,10 +65,21 @@ def _cache_set(key: str, value: list) -> None:
 
 
 def _fetch(url: str) -> object | None:
-    """统一请求入口：scrapling 0.4.x 用 Fetcher.get()（classmethod，无需浏览器）。"""
+    """统一请求入口：requests 做 HTTP，scrapling.parser.Adaptor 做 CSS 解析。
+
+    不使用 scrapling.Fetcher（底层 curl_cffi），因为 curl_cffi 在路径含非 ASCII
+    字符（如中文目录）的 exe 中读取 CA 证书失败（curl error 77）。
+    """
     try:
-        from scrapling.fetchers import Fetcher
-        return Fetcher.get(url)
+        import requests as _req
+        from scrapling.parser import Adaptor
+        r = _req.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return Adaptor(r.text, url=url)
     except Exception as e:
         logger.error("请求失败 [%s]: %s", url, e)
         return None
@@ -513,7 +524,7 @@ def _bgm_canonical_names(title: str) -> "tuple[list[int], list[str]]":
     """
     try:
         from urllib.parse import quote as _quote
-        _hdrs = {"User-Agent": "anime-rss/1.0", "Accept": "application/json"}
+        _hdrs = {"User-Agent": "zhuifanji/1.0", "Accept": "application/json"}
 
         # 旧版 API：排序与网站一致，能正确区分多季
         resp = _requests.get(

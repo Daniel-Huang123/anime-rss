@@ -27,11 +27,11 @@ jobs:
 
       - name: Syntax check (py compile)
         run: |
-          uv run python -m compileall src pages app.py -q
+          uv run python -m compileall src gui tests gui_main.py main.py -q
 
       - name: Ruff lint
         run: |
-          uv run ruff check src pages app.py --select E,F,W --ignore E501,E402,F401
+          uv run ruff check src gui tests gui_main.py main.py --select E,F,W --ignore E501,E402,F401
 
       - name: Pytest
         run: |

@@ -1,4 +1,4 @@
-"""番剧自动订阅系统 — PyQt6 原生 GUI 入口。
+"""追番姬 zhuifanji — PyQt6 原生 GUI 入口。
 
 启动方式（在项目根目录下）：
     uv run python gui_main.py

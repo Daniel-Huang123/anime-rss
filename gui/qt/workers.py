@@ -36,6 +36,12 @@ class Worker(QRunnable):
             result = self._fn(*self._args, **self._kwargs)
             self.signals.result.emit(result)
         except Exception:
-            self.signals.error.emit(traceback.format_exc())
+            detail = traceback.format_exc()
+            self.signals.error.emit(detail)
+            try:
+                from src.utils.crash_handler import report_background_exception
+                report_background_exception(detail)
+            except Exception:
+                pass
         finally:
             self.signals.finished.emit()

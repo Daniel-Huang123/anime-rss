@@ -43,7 +43,7 @@ class OnboardingDialog(QDialog):
         root.setContentsMargins(24, 20, 24, 20)
 
         # ── 欢迎标题 ──
-        welcome = QLabel("🎌  欢迎使用番剧自动订阅管理")
+        welcome = QLabel("🎌  欢迎使用追番姬")
         welcome.setObjectName("page-title")
         root.addWidget(welcome)
 
@@ -54,6 +54,16 @@ class OnboardingDialog(QDialog):
         hint.setObjectName("hint-text")
         hint.setWordWrap(True)
         root.addWidget(hint)
+
+        install_tip = QLabel(
+            '还没装 qBittorrent？'
+            '<a href="https://www.qbittorrent.org/download">点这里下载 qBittorrent</a>。<br>'
+            '安装后请在 qBittorrent 打开：工具 → 选项 → Web UI，勾选“启用 Web 用户界面”。'
+        )
+        install_tip.setObjectName("hint-text")
+        install_tip.setWordWrap(True)
+        install_tip.setOpenExternalLinks(True)
+        root.addWidget(install_tip)
 
         # ── qBittorrent 连接 ──
         qbt_group = QGroupBox("qBittorrent 连接信息")
@@ -105,6 +115,11 @@ class OnboardingDialog(QDialog):
 
         root.addWidget(qbt_group)
 
+        self.qbt_probe_lbl = QLabel("qBittorrent 运行状态：检测中...")
+        self.qbt_probe_lbl.setObjectName("hint-text")
+        self.qbt_probe_lbl.setWordWrap(True)
+        root.addWidget(self.qbt_probe_lbl)
+
         # ── 测试连接按钮 ──
         test_row = QHBoxLayout()
         self.test_btn = QPushButton("🔌  测试连接")
@@ -140,6 +155,10 @@ class OnboardingDialog(QDialog):
         btn_row.addWidget(self.ok_btn)
         root.addLayout(btn_row)
 
+        self.host_edit.textChanged.connect(self._update_qbt_probe_status)
+        self.port_spin.valueChanged.connect(lambda _v: self._update_qbt_probe_status())
+        self._update_qbt_probe_status()
+
     def _test_connection(self) -> None:
         self.test_status.setText("连接中...")
         self.test_btn.setEnabled(False)
@@ -169,6 +188,17 @@ class OnboardingDialog(QDialog):
         self.test_status.setText(f"{'✅' if ok else '❌'} {msg}")
         self.test_status.setProperty("status", "ok" if ok else "error")
         repolish(self.test_status)
+
+    def _update_qbt_probe_status(self) -> None:
+        host = self.host_edit.text().strip() or "127.0.0.1"
+        port = int(self.port_spin.value())
+        if QBTClient.is_webui_port_open(host, port):
+            self.qbt_probe_lbl.setText(f"qBittorrent 运行状态：✅ 已检测到 {host}:{port}")
+            return
+        self.qbt_probe_lbl.setText(
+            "qBittorrent 运行状态：⚠️ 未检测到 Web UI 端口。"
+            "请先启动 qBittorrent，并在 Web UI 设置里开启监听端口。"
+        )
 
     def _on_ok(self) -> None:
         save_path = self.save_path_edit.text().strip().strip('"').strip("'")

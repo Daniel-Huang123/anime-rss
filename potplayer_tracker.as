@@ -11,7 +11,7 @@
 const string MEDIA_ROOT = "D:\\Anime";
 
 // Recommended: project-root\\potplayer_plays.txt.
-const string LOG_FILE = "C:\\Path\\To\\anime-rss\\potplayer_plays.txt";
+const string LOG_FILE = "C:\\Path\\To\\zhuifanji\\potplayer_plays.txt";
 
 bool StartsWithPath(const string &in path, const string &in root)
 {
