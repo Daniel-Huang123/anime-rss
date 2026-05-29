@@ -206,7 +206,6 @@ def test_sync_local_subscriptions_skips_dev_dirs(tmp_state):
 
 
 def test_sync_local_subscriptions_prunes_bad_recovered_entries(tmp_state):
-    import json
     from src.utils.state import get_subscriptions, sync_local_subscriptions
 
     raw = json.loads(tmp_state.read_text(encoding="utf-8"))
