@@ -187,7 +187,15 @@ uv run python gui_main.py
 为 Phase 0 提供的中文小白教程草稿见：
 - `docs/wiki/新手教程.md`
 
-可直接复制到 GitHub Wiki 并补充截图标注。
+可直接复制到 GitHub Wiki 并补充截图标注。下面是 qBittorrent 配置关键截图：
+
+### 1. 从主界面进入 WebUI 设置
+
+![qBittorrent 主界面入口](docs/images/qbt-main-entry-step.png)
+
+### 2. WebUI 参数填写示例
+
+![qBittorrent WebUI 设置](docs/images/qbt-webui-step.png)
 
 ---
 
