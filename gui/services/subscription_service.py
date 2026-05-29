@@ -78,15 +78,14 @@ class SeasonDataset:
     yuc_bgm_map: dict[str, int]
 
 
-def build_season_dataset(cfg: dict, quarter: str) -> SeasonDataset:
+def build_season_grid(cfg: dict, quarter: str) -> SeasonDataset:
+    """快路径：只抓 yuc.wiki 番单即可渲染网格。
+
+    不构建蜜柑索引，因此 bgm_url 暂空、season_index/yuc_bgm_map 为空——
+    这些由后台 build_season_index_and_map 构建完成后再回填（见 season 页两段式加载）。
+    """
     year, month = quarter_to_ym(quarter)
     anime_list = get_season_list(year, month)
-
-    use_mirror = cfg.get("advanced", {}).get("use_mirror", False)
-    season_index = build_season_index(quarter, use_mirror=use_mirror)
-
-    titles = [a["title"] for a in anime_list]
-    yuc_bgm_map = build_yuc_bgm_map(titles, season_index, quarter, use_mirror=use_mirror) if titles else {}
 
     subbed_titles = {s["title"] for s in get_subscriptions(quarter).get(quarter, [])}
     day_order = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6}
@@ -98,13 +97,47 @@ def build_season_dataset(cfg: dict, quarter: str) -> SeasonDataset:
             episodes=str(a.get("episodes", "") or "—"),
             broadcast_time=str(a.get("broadcast_time", "") or "—"),
             cover_url=a.get("cover_url"),
-            bgm_url=(f"https://bgm.tv/subject/{yuc_bgm_map[a['title']]}" if a["title"] in yuc_bgm_map else ""),
+            bgm_url="",
             subscribed=a["title"] in subbed_titles,
         )
         for a in anime_list
     ]
     items.sort(key=lambda x: (day_order.get(x.day, 99), x.title))
-    return SeasonDataset(quarter=quarter, items=items, season_index=season_index, yuc_bgm_map=yuc_bgm_map)
+    return SeasonDataset(quarter=quarter, items=items, season_index={}, yuc_bgm_map={})
+
+
+def build_season_index_and_map(cfg: dict, quarter: str) -> tuple[dict[int, int], dict[str, int]]:
+    """慢路径（后台执行）：构建蜜柑 bgm_id 索引 + yuc→bgm 映射。
+
+    返回 (season_index, yuc_bgm_map)，由调用方回填到已渲染的 dataset。
+    """
+    use_mirror = cfg.get("advanced", {}).get("use_mirror", False)
+    season_index = build_season_index(quarter, use_mirror=use_mirror)
+
+    year, month = quarter_to_ym(quarter)
+    titles = [a["title"] for a in get_season_list(year, month)]
+    yuc_bgm_map = (
+        build_yuc_bgm_map(titles, season_index, quarter, use_mirror=use_mirror)
+        if titles else {}
+    )
+    return season_index, yuc_bgm_map
+
+
+def build_season_dataset(cfg: dict, quarter: str) -> SeasonDataset:
+    """同步全量构建（grid + 索引），保留供非两段式调用方/测试使用。"""
+    dataset = build_season_grid(cfg, quarter)
+    season_index, yuc_bgm_map = build_season_index_and_map(cfg, quarter)
+    dataset.season_index = season_index
+    dataset.yuc_bgm_map = yuc_bgm_map
+    apply_bgm_map(dataset, yuc_bgm_map)
+    return dataset
+
+
+def apply_bgm_map(dataset: SeasonDataset, yuc_bgm_map: dict[str, int]) -> None:
+    """把 yuc→bgm 映射回填到 dataset.items 的 bgm_url（就地修改）。"""
+    for it in dataset.items:
+        if it.title in yuc_bgm_map:
+            it.bgm_url = f"https://bgm.tv/subject/{yuc_bgm_map[it.title]}"
 
 
 def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, season_index: dict[int, int], search_override: str | None = None) -> tuple[bool, str]:
@@ -119,7 +152,8 @@ def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, 
         priorities,
         weeks,
         use_mirror,
-        season_index=None if search_override else season_index,
+        # 索引未就绪（{}）时传 None，自动走 resolve 的按需解析兜底路径
+        season_index=None if search_override else (season_index or None),
         search_override=search_override,
         quarter=quarter,
     )
