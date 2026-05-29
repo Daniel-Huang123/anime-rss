@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QThreadPool
+from PyQt6.QtCore import Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from gui.qt.workers import Worker
 from gui.services.config_service import ConfigService
 from src.qbt.client import QBTClient
-from src.utils.runtime_paths import APP_ROOT
+from src.utils.runtime_paths import find_resource
 
 
 class OnboardingDialog(QDialog):
@@ -32,15 +32,22 @@ class OnboardingDialog(QDialog):
     完成后写入 config.yaml，向导不会再次出现。
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, start_page: int = 0) -> None:
         super().__init__(parent)
-        self.setWindowTitle("欢迎使用 — 快速设置")
+        self.setWindowTitle("追番姬 - 快速设置")
         self.setMinimumWidth(640)
         self.setMinimumHeight(560)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self._cfg = ConfigService.load()
         self._thread_pool = QThreadPool.globalInstance()
         self._test_worker: Worker | None = None
+        self._probe_worker: Worker | None = None
+        self._probe_running_seq = 0
+        self._probe_seq = 0
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setSingleShot(True)
+        self._probe_timer.timeout.connect(self._run_qbt_probe)
+        self._start_page = 1 if start_page == 1 else 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -50,12 +57,12 @@ class OnboardingDialog(QDialog):
         outer.addWidget(self.stack)
         self.stack.addWidget(self._build_form_page())   # page 0：填信息
         self.stack.addWidget(self._build_guide_page())  # page 1：图文指引
-        self.stack.setCurrentIndex(0)
+        self.stack.setCurrentIndex(self._start_page)
 
-        # 端口探测随输入实时刷新
-        self.host_edit.textChanged.connect(self._update_qbt_probe_status)
-        self.port_spin.valueChanged.connect(lambda _v: self._update_qbt_probe_status())
-        self._update_qbt_probe_status()
+        # 端口探测使用防抖 + 后台线程，避免输入端口时卡顿。
+        self.host_edit.textChanged.connect(self._schedule_qbt_probe)
+        self.port_spin.valueChanged.connect(lambda _v: self._schedule_qbt_probe())
+        self._schedule_qbt_probe()
 
     def _build_form_page(self) -> QWidget:
         page = QWidget()
@@ -218,8 +225,8 @@ class OnboardingDialog(QDialog):
 
         # 截图（打包未含图时静默跳过）
         for img in ("qbt-main-entry-step.png", "qbt-webui-step.png"):
-            p = APP_ROOT / "docs" / "images" / img
-            if not p.exists():
+            p = find_resource("docs", "images", img)
+            if p is None:
                 continue
             pix = QPixmap(str(p))
             if pix.isNull():
@@ -280,16 +287,47 @@ class OnboardingDialog(QDialog):
         self.test_status.setProperty("status", "ok" if ok else "error")
         repolish(self.test_status)
 
-    def _update_qbt_probe_status(self) -> None:
+    def _schedule_qbt_probe(self) -> None:
+        self._probe_seq += 1
+        self.qbt_probe_lbl.setText("qBittorrent 运行状态：检测中...")
+        self._probe_timer.start(220)
+
+    def _run_qbt_probe(self) -> None:
+        if self._probe_worker is not None:
+            # A probe is still running; retry shortly for the latest input.
+            self._probe_timer.start(150)
+            return
+
+        seq = self._probe_seq
+        self._probe_running_seq = seq
         host = self.host_edit.text().strip() or "127.0.0.1"
         port = int(self.port_spin.value())
-        if QBTClient.is_webui_port_open(host, port):
+        self._probe_worker = Worker(self._probe_port_open, host, port, seq)
+        self._probe_worker.signals.result.connect(self._on_qbt_probe_done)
+        self._probe_worker.signals.finished.connect(self._on_qbt_probe_finished)
+        self._thread_pool.start(self._probe_worker)
+
+    @staticmethod
+    def _probe_port_open(host: str, port: int, seq: int) -> tuple[int, str, int, bool]:
+        return seq, host, port, QBTClient.is_webui_port_open(host, port)
+
+    def _on_qbt_probe_done(self, result: tuple[int, str, int, bool]) -> None:
+        seq, host, port, is_open = result
+        if seq != self._probe_seq:
+            return
+        if is_open:
             self.qbt_probe_lbl.setText(f"qBittorrent 运行状态：✅ 已检测到 {host}:{port}")
             return
         self.qbt_probe_lbl.setText(
             "qBittorrent 运行状态：⚠️ 未检测到 Web UI 端口。"
             "请先启动 qBittorrent，并在 Web UI 设置里开启监听端口。"
         )
+
+    def _on_qbt_probe_finished(self) -> None:
+        self._probe_worker = None
+        # New input may have arrived while probing.
+        if self._probe_running_seq != self._probe_seq:
+            self._probe_timer.start(1)
 
     def _on_ok(self) -> None:
         save_path = self.save_path_edit.text().strip().strip('"').strip("'")

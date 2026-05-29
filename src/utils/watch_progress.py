@@ -107,10 +107,20 @@ Get-ChildItem '{recent_escaped}' -Filter '*.lnk' -ErrorAction SilentlyContinue |
 """
     try:
         ps_utf8 = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + ps_script
+        creationflags = 0
+        startupinfo = None
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-Command", ps_utf8],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
         )
         lines = result.stdout.decode("utf-8", errors="replace").strip().splitlines()
     except Exception:

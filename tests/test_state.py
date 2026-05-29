@@ -94,3 +94,144 @@ def test_cleanup_log(tmp_state):
     assert len(logs) == 2
     assert logs[0]["quarter"] == "2025Q1"
     assert logs[0]["count"] == 5
+
+
+def test_sync_local_subscriptions_detects_quarter_and_fallback(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    media_root = tmp_path / "media"
+    (media_root / "2025Q4" / "番剧A").mkdir(parents=True, exist_ok=True)
+    (media_root / "番剧B").mkdir(parents=True, exist_ok=True)
+    (media_root / "2025Q4" / "番剧A" / "01.mkv").write_bytes(b"x")
+    (media_root / "番剧B" / "02.mp4").write_bytes(b"x")
+
+    added = sync_local_subscriptions(media_root)
+    assert added == 2
+
+    subs = get_subscriptions()
+    assert any(s["title"] == "番剧A" for s in subs["2025Q4"])
+    assert any(s["title"] == "番剧B" for s in subs["2026Q2"])
+
+
+def test_sync_local_subscriptions_is_incremental(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import add_subscription, get_subscriptions, sync_local_subscriptions
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    add_subscription("2025Q4", "番剧A", 123, 1, "ANi", "http://rss")
+
+    media_root = tmp_path / "media"
+    (media_root / "2025Q4" / "番剧A").mkdir(parents=True, exist_ok=True)
+    (media_root / "2025Q4" / "番剧C").mkdir(parents=True, exist_ok=True)
+    (media_root / "2025Q4" / "番剧A" / "01.mkv").write_bytes(b"x")
+    (media_root / "2025Q4" / "番剧C" / "01.mkv").write_bytes(b"x")
+
+    added = sync_local_subscriptions(media_root)
+    assert added == 1
+
+    subs = get_subscriptions("2025Q4")["2025Q4"]
+    assert any(s["title"] == "番剧A" and s["subgroup_name"] == "ANi" for s in subs)
+    assert any(s["title"] == "番剧C" and s.get("recovered_local") is True for s in subs)
+
+
+def test_enrich_recovered_subscriptions_from_rules_by_path(tmp_state):
+    from src.utils.state import enrich_recovered_subscriptions_from_rules, get_subscriptions, sync_local_subscriptions
+
+    media_root = tmp_state.parent / "media"
+    (media_root / "2026Q2" / "番剧A").mkdir(parents=True, exist_ok=True)
+    (media_root / "2026Q2" / "番剧A" / "01.mkv").write_bytes(b"x")
+    sync_local_subscriptions(media_root)
+
+    rules = {
+        "2026Q2/番剧A": {
+            "affectedFeeds": [
+                "https://mikanani.me/RSS/Bangumi?bangumiId=999&subgroupid=1"
+            ]
+        }
+    }
+    changed = enrich_recovered_subscriptions_from_rules(rules)
+    assert changed == 1
+
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["rss_url"].startswith("https://mikanani.me/RSS/Bangumi")
+    assert sub["bangumi_id"] == 999
+
+
+def test_enrich_recovered_subscriptions_from_rules_by_title_fallback(tmp_state):
+    from src.utils.state import enrich_recovered_subscriptions_from_rules, get_subscriptions, sync_local_subscriptions
+
+    media_root = tmp_state.parent / "media"
+    (media_root / "2026Q2" / "番剧B").mkdir(parents=True, exist_ok=True)
+    (media_root / "2026Q2" / "番剧B" / "01.mkv").write_bytes(b"x")
+    sync_local_subscriptions(media_root)
+
+    rules = {
+        "2025Q4/番剧B": {
+            "affectedFeeds": [
+                "https://mikanani.me/RSS/Bangumi?bangumiId=111&subgroupid=1"
+            ]
+        },
+        "2026Q2/番剧B": {
+            "affectedFeeds": [
+                "https://mikanani.me/RSS/Bangumi?bangumiId=222&subgroupid=1"
+            ]
+        },
+    }
+    changed = enrich_recovered_subscriptions_from_rules(rules)
+    assert changed == 1
+
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["rss_url"].endswith("bangumiId=222&subgroupid=1")
+    assert sub["bangumi_id"] == 222
+
+
+def test_sync_local_subscriptions_skips_dev_dirs(tmp_state):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+
+    media_root = tmp_state.parent / "media"
+    (media_root / ".venv" / "lib").mkdir(parents=True, exist_ok=True)
+    (media_root / ".venv" / "lib" / "junk.ts").write_bytes(b"x")
+    (media_root / "2026Q2" / "番剧D").mkdir(parents=True, exist_ok=True)
+    (media_root / "2026Q2" / "番剧D" / "01.mkv").write_bytes(b"x")
+
+    added = sync_local_subscriptions(media_root)
+    assert added == 1
+    subs = get_subscriptions("2026Q2")["2026Q2"]
+    assert any(s["title"] == "番剧D" for s in subs)
+    assert all(s["title"] != ".venv" for s in subs)
+
+
+def test_sync_local_subscriptions_prunes_bad_recovered_entries(tmp_state):
+    import json
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+
+    raw = json.loads(tmp_state.read_text(encoding="utf-8"))
+    raw["subscriptions"]["2026Q2"] = [
+        {
+            "title": ".venv",
+            "bangumi_id": 0,
+            "subgroup_id": 0,
+            "subgroup_name": "local",
+            "rss_url": "",
+            "qbt_feed_path": "2026Q2/.venv",
+            "added_at": "2026-05-29",
+            "cover_url": None,
+            "bgm_id": None,
+            "recovered_local": True,
+        }
+    ]
+    tmp_state.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    media_root = tmp_state.parent / "media"
+    (media_root / "2026Q2" / "番剧E").mkdir(parents=True, exist_ok=True)
+    (media_root / "2026Q2" / "番剧E" / "01.mkv").write_bytes(b"x")
+    sync_local_subscriptions(media_root)
+
+    subs = get_subscriptions("2026Q2")["2026Q2"]
+    titles = {s["title"] for s in subs}
+    assert ".venv" not in titles
+    assert "番剧E" in titles

@@ -17,6 +17,17 @@ from pathlib import Path
 
 # 支持的视频扩展名
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".m2ts", ".ts"}
+_SKIP_SEGMENTS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "dist",
+    "build",
+    "node_modules",
+}
 
 # 需要去除的画质/编码标记
 _QUALITY_TAGS = re.compile(
@@ -228,6 +239,9 @@ def scan_media_directory(root: Path | str, depth: int = 4) -> list[AnimeFolder]:
                 # 排除过深的路径
                 try:
                     rel = p.relative_to(root)
+                    segment_names = [str(seg).strip().lower() for seg in rel.parts[:-1]]
+                    if any((name.startswith(".") or name in _SKIP_SEGMENTS) for name in segment_names):
+                        continue
                     if len(rel.parts) <= depth:
                         all_videos.append(p)
                 except ValueError:

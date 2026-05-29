@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import QThreadPool, QTimer, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QPixmap
@@ -21,7 +22,7 @@ from PyQt6.QtWidgets import (
 
 from gui.qt.workers import Worker
 from gui.services.config_service import ConfigService
-from gui.services.cover_service import bytes_to_pixmap, folder_cover_bytes
+from gui.services.cover_service import batch_folder_cover_bytes, bytes_to_pixmap
 from gui.services.media_service import AnimeRow, build_media_rows
 from gui.themes import repolish
 from gui.views.widgets.cover_card import CoverCard
@@ -33,6 +34,10 @@ from src.utils.watch_progress import (
     record_played,
     resume_episode,
 )
+
+
+def _scale_cover(data: bytes | None, width: int, height: int) -> QPixmap:
+    return bytes_to_pixmap(data, width=width, height=height)
 
 
 # ── Episode detail page (full page, not dialog) ──────────────────
@@ -128,23 +133,9 @@ class EpisodeDetailPage(QWidget):
         self._row = row
         self.title_lbl.setText(row.title)
 
-        # cover
-        data = folder_cover_bytes(row.folder)
-        if data:
-            pix = QPixmap()
-            pix.loadFromData(data)
-            if not pix.isNull():
-                self.cover_lbl.setPixmap(
-                    pix.scaled(
-                        180, 252,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-            else:
-                self.cover_lbl.clear()
-        else:
-            self.cover_lbl.clear()
+        # cover (only from cache; async updater fills later)
+        cover_data = self._parent._cover_bytes_by_title.get(row.title)
+        self.set_cover_bytes(cover_data)
 
         # episodes & watch state
         media_root = Path(
@@ -204,6 +195,12 @@ class EpisodeDetailPage(QWidget):
             wrapper = QWidget()
             wrapper.setLayout(cell)
             self.eps_grid.addWidget(wrapper, i // cols, i % cols)
+
+    def set_cover_bytes(self, data: bytes | None) -> None:
+        if data:
+            self.cover_lbl.setPixmap(_scale_cover(data, 180, 252))
+        else:
+            self.cover_lbl.clear()
 
     def _clear_eps(self) -> None:
         while self.eps_grid.count():
@@ -271,28 +268,18 @@ class _FeaturedCard(QFrame):
 
         h.addLayout(col, stretch=1)
 
-    def load(self, row: AnimeRow, on_continue, on_open) -> None:
+    def load(
+        self,
+        row: AnimeRow,
+        on_continue: Callable[[AnimeRow], None],
+        on_open: Callable[[AnimeRow], None],
+        cover_data: bytes | None = None,
+    ) -> None:
         self._row = row
         self._on_continue = on_continue
         self._on_open = on_open
         self.title_lbl.setText(row.title)
-
-        data = folder_cover_bytes(row.folder)
-        if data:
-            pix = QPixmap()
-            pix.loadFromData(data)
-            if not pix.isNull():
-                self.cover_lbl.setPixmap(
-                    pix.scaled(
-                        110, 154,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-            else:
-                self.cover_lbl.clear()
-        else:
-            self.cover_lbl.clear()
+        self.set_cover_bytes(cover_data)
 
         latest = row.latest_label
         self.meta_lbl.setText(
@@ -309,6 +296,12 @@ class _FeaturedCard(QFrame):
             self.action_btn.setText(f"▶ 继续观看  {cont_label}" if cont_label else "▶ 继续观看")
         else:
             self.action_btn.setText("👀 快看看我")
+
+    def set_cover_bytes(self, data: bytes | None) -> None:
+        if data:
+            self.cover_lbl.setPixmap(_scale_cover(data, 110, 154))
+        else:
+            self.cover_lbl.clear()
 
     def _cover_clicked(self, _event) -> None:
         if self._row and self._on_open:
@@ -330,6 +323,14 @@ class MediaLibraryPage(QWidget):
         self._refresh_timer.timeout.connect(self.refresh_async)
         self._rows: list[AnimeRow] = []
         self._active_workers: list = []
+        self._cover_bytes_by_title: dict[str, bytes] = {}
+        self._cards_by_title: dict[str, list[CoverCard]] = {}
+        self._scan_running = False
+        self._pending_refresh = False
+        self._scan_seq = 0
+        self._cover_seq = 0
+        self._backfilled_paths: set[str] = set()
+        self._current_media_path = ""
         self._build_ui()
         self.apply_config(config)
         self.refresh_async()
@@ -500,6 +501,7 @@ class MediaLibraryPage(QWidget):
             self._refresh_timer.start(max(5, min(seconds, 3600)) * 1000)
 
     def _clear_cards(self) -> None:
+        self._cards_by_title = {}
         while self.cards_grid.count():
             item = self.cards_grid.takeAt(0)
             w = item.widget()
@@ -510,7 +512,28 @@ class MediaLibraryPage(QWidget):
         available = self.scroll.viewport().width() - 10
         return max(2, available // 170)
 
+    def _update_visible_covers(self) -> None:
+        for title, cards in self._cards_by_title.items():
+            data = self._cover_bytes_by_title.get(title)
+            if not data:
+                continue
+            pixmap = _scale_cover(data, 140, 196)
+            for card in cards:
+                card.set_cover_pixmap(pixmap)
+
+        featured = self._pick_featured(self._filtered_rows())
+        if featured:
+            self.featured_card.set_cover_bytes(self._cover_bytes_by_title.get(featured.title))
+
+        if self.stack.currentIndex() == 1 and self.detail_page._row:
+            self.detail_page.set_cover_bytes(self._cover_bytes_by_title.get(self.detail_page._row.title))
+
     def refresh_async(self) -> None:
+        if self._scan_running:
+            self._pending_refresh = True
+            self.status_label.setText("扫描进行中，完成后会自动刷新…")
+            return
+
         media_path = self._cfg.get("qbittorrent", {}).get("save_path", "").strip().strip('"').strip("'")
         if not media_path:
             self.status_label.setText("未配置媒体目录，请前往「⚙️ 设置」配置 qBittorrent 下载路径。")
@@ -519,27 +542,55 @@ class MediaLibraryPage(QWidget):
             self.status_label.setText(f"媒体目录不存在：{media_path}")
             return
 
+        if media_path != self._current_media_path:
+            self._current_media_path = media_path
+            self._cover_bytes_by_title = {}
+
+        need_backfill = media_path not in self._backfilled_paths
+        self._scan_running = True
+        self._scan_seq += 1
+        scan_seq = self._scan_seq
+
         self.refresh_btn.setEnabled(False)
         self.status_label.setText("扫描媒体库中...")
-        worker = Worker(build_media_rows, media_path)
+        worker = Worker(build_media_rows, media_path, self._cfg.get("qbittorrent", {}), need_backfill)
         self._active_workers.append(worker)
-        worker.signals.result.connect(self._on_rows_loaded)
-        worker.signals.error.connect(self._on_refresh_error)
-        worker.signals.finished.connect(lambda w=worker: (
-            self.refresh_btn.setEnabled(True),
-            self._active_workers.remove(w) if w in self._active_workers else None,
-        ))
+        worker.signals.result.connect(
+            lambda rows, seq=scan_seq, path=media_path, backfill=need_backfill: self._on_rows_loaded(
+                rows, seq, path, backfill
+            )
+        )
+        worker.signals.error.connect(lambda text, seq=scan_seq: self._on_refresh_error(text, seq))
+        worker.signals.finished.connect(lambda w=worker, seq=scan_seq: self._on_scan_finished(w, seq))
         self._thread_pool.start(worker)
 
-    def _on_refresh_error(self, text: str) -> None:
+    def _on_scan_finished(self, worker: Worker, seq: int) -> None:
+        if worker in self._active_workers:
+            self._active_workers.remove(worker)
+        if seq != self._scan_seq:
+            return
+        self._scan_running = False
+        self.refresh_btn.setEnabled(True)
+        if self._pending_refresh:
+            self._pending_refresh = False
+            QTimer.singleShot(0, self.refresh_async)
+
+    def _on_refresh_error(self, text: str, seq: int) -> None:
+        if seq != self._scan_seq:
+            return
         self.status_label.setText("扫描失败")
         QMessageBox.critical(self, "扫描失败", text)
 
-    def _on_rows_loaded(self, rows: list[AnimeRow]) -> None:
+    def _on_rows_loaded(self, rows: list[AnimeRow], seq: int, media_path: str, backfill: bool) -> None:
+        if seq != self._scan_seq:
+            return
+        if backfill:
+            self._backfilled_paths.add(media_path)
         self._rows = rows
         self._render_rows()
         total_eps = sum(r.episode_count for r in rows)
         self.status_label.setText(f"共 {len(rows)} 部番剧  ·  {total_eps} 个文件")
+        self._start_cover_loading(rows)
         # If currently in detail view and the row still exists, reload it
         if self.stack.currentIndex() == 1 and self.detail_page._row:
             old_title = self.detail_page._row.title
@@ -562,13 +613,47 @@ class MediaLibraryPage(QWidget):
             return max(rows, key=lambda r: r.folder.latest_mtime)
         return None
 
+    def _start_cover_loading(self, rows: list[AnimeRow]) -> None:
+        if not rows:
+            return
+        self._cover_seq += 1
+        cover_seq = self._cover_seq
+        folders = [r.folder for r in rows]
+        worker = Worker(batch_folder_cover_bytes, folders, allow_network=True)
+        self._active_workers.append(worker)
+        worker.signals.result.connect(lambda cover_map, seq=cover_seq: self._on_covers_loaded(cover_map, seq))
+        worker.signals.error.connect(lambda text, seq=cover_seq: self._on_cover_error(text, seq))
+        worker.signals.finished.connect(
+            lambda w=worker: self._active_workers.remove(w) if w in self._active_workers else None
+        )
+        self._thread_pool.start(worker)
+
+    def _on_cover_error(self, _text: str, seq: int) -> None:
+        if seq != self._cover_seq:
+            return
+        # 封面失败不影响主流程，保持当前状态文本，等待下次刷新重试
+        return
+
+    def _on_covers_loaded(self, cover_map: dict[str, bytes], seq: int) -> None:
+        if seq != self._cover_seq:
+            return
+        if not cover_map:
+            return
+        self._cover_bytes_by_title.update(cover_map)
+        self._update_visible_covers()
+
     def _render_rows(self) -> None:
         self._clear_cards()
         rows = self._filtered_rows()
 
         featured = self._pick_featured(rows)
         if featured:
-            self.featured_card.load(featured, self._continue_play_row, self._show_detail)
+            self.featured_card.load(
+                featured,
+                self._continue_play_row,
+                self._show_detail,
+                self._cover_bytes_by_title.get(featured.title),
+            )
             self.featured_card.setVisible(True)
         else:
             self.featured_card.setVisible(False)
@@ -578,7 +663,7 @@ class MediaLibraryPage(QWidget):
             has_progress = row.continue_path is not None
             action_text = "继续看我 ▶" if has_progress else "快看看我 👀"
             subtitle = f"{row.watched_count}/{row.episode_count} 集  ·  最新 {row.latest_label}"
-            cover = bytes_to_pixmap(folder_cover_bytes(row.folder))
+            cover = _scale_cover(self._cover_bytes_by_title.get(row.title), 140, 196)
             card = CoverCard(
                 title=row.title,
                 subtitle=subtitle,
@@ -591,6 +676,7 @@ class MediaLibraryPage(QWidget):
                 lambda _r=row: self._continue_play_row(_r)
             )
             self.cards_grid.addWidget(card, i // cols, i % cols)
+            self._cards_by_title.setdefault(row.title, []).append(card)
 
     def _continue_play_row(self, row: AnimeRow) -> None:
         if row.continue_path:
@@ -609,7 +695,6 @@ class MediaLibraryPage(QWidget):
 
     def show_grid(self) -> None:
         self.stack.setCurrentIndex(0)
-        self.refresh_async()
 
     def _continue_play(self, path: Path | None) -> None:
         if path is None:

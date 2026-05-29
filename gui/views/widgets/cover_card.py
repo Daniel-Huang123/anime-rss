@@ -30,8 +30,7 @@ class CoverCard(QFrame):
         self.cover_btn.setObjectName("cover-btn")
         self.cover_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cover_btn.setFixedSize(144, 200)
-        self.cover_btn.setIcon(QIcon(pixmap))
-        self.cover_btn.setIconSize(self.cover_btn.size())
+        self.set_cover_pixmap(pixmap)
         self.cover_btn.clicked.connect(self.cover_clicked.emit)
         root.addWidget(self.cover_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -50,3 +49,7 @@ class CoverCard(QFrame):
             self.action_btn.setEnabled(action_enabled)
             self.action_btn.clicked.connect(self.action_clicked.emit)
             root.addWidget(self.action_btn)
+
+    def set_cover_pixmap(self, pixmap: QPixmap) -> None:
+        self.cover_btn.setIcon(QIcon(pixmap))
+        self.cover_btn.setIconSize(self.cover_btn.size())

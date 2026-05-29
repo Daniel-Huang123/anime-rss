@@ -5,6 +5,8 @@ from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal, pyqtSlot
 
+_RUNNING_WORKERS: set["Worker"] = set()
+
 
 class WorkerSignals(QObject):
     finished = pyqtSignal()
@@ -27,6 +29,8 @@ class Worker(QRunnable):
         self._args = args
         self._kwargs = kwargs
         self.signals = WorkerSignals()
+        # 强持有，防止运行中被 GC 导致 signals C++ 对象提前释放
+        _RUNNING_WORKERS.add(self)
         # 不让 QThreadPool 自动 delete，由 Python 负责生命周期
         self.setAutoDelete(False)
 
@@ -34,14 +38,24 @@ class Worker(QRunnable):
     def run(self) -> None:
         try:
             result = self._fn(*self._args, **self._kwargs)
-            self.signals.result.emit(result)
+            try:
+                self.signals.result.emit(result)
+            except RuntimeError:
+                pass
         except Exception:
             detail = traceback.format_exc()
-            self.signals.error.emit(detail)
+            try:
+                self.signals.error.emit(detail)
+            except RuntimeError:
+                pass
             try:
                 from src.utils.crash_handler import report_background_exception
                 report_background_exception(detail)
             except Exception:
                 pass
         finally:
-            self.signals.finished.emit()
+            try:
+                self.signals.finished.emit()
+            except RuntimeError:
+                pass
+            _RUNNING_WORKERS.discard(self)

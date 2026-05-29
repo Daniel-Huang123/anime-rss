@@ -21,7 +21,8 @@ from PyQt6.QtWidgets import (
 
 from gui.qt.workers import Worker
 from gui.services.config_service import ConfigService
-from gui.themes import THEMES, repolish
+from gui.themes import DEFAULT_THEME, THEMES, repolish
+from gui.views.onboarding_dialog import OnboardingDialog
 from gui.views.widgets.priority_list import PriorityListEditor
 from src.qbt.client import QBTClient
 
@@ -101,6 +102,15 @@ class SettingsPage(QWidget):
         save_path_wrap = QWidget()
         save_path_wrap.setLayout(save_path_row)
         qbt_form.addRow(QLabel("下载保存路径"), save_path_wrap)
+        from gui.themes import current
+        accent = current()["accent"]
+        guide_link = QLabel(
+            f'<a href="#qbt-guide" style="color:{accent};text-decoration:none;font-weight:600;">'
+            "不知道怎么配？点我看教程</a>"
+        )
+        guide_link.setObjectName("hint-text")
+        guide_link.linkActivated.connect(lambda _: self._open_qbt_guide())
+        qbt_form.addRow(QLabel(""), guide_link)
         root.addWidget(qbt_group)
 
         test_row = QHBoxLayout()
@@ -172,11 +182,15 @@ class SettingsPage(QWidget):
         root.addLayout(btn_row)
         root.addStretch(1)
 
+    def _open_qbt_guide(self) -> None:
+        dlg = OnboardingDialog(self, start_page=1)
+        dlg.exec()
+
     def _load_to_form(self) -> None:
         qbt = self._cfg.get("qbittorrent", {})
         ui = self._cfg.get("ui", {})
 
-        theme_key = ui.get("theme", "night")
+        theme_key = ui.get("theme", DEFAULT_THEME)
         idx = self.theme_combo.findData(theme_key)
         if idx >= 0:
             self.theme_combo.setCurrentIndex(idx)

@@ -21,7 +21,7 @@ from gui.themes import repolish
 from src.qbt.client import QBTClient
 from src.utils.file_parser import scan_media_directory
 from src.utils.season import current_quarter
-from src.utils.state import get_all_subscriptions_flat, get_quarters_to_cleanup
+from src.utils.state import get_all_subscriptions_flat, get_quarters_to_cleanup, sync_local_subscriptions
 
 
 class _MetricCard(QFrame):
@@ -158,6 +158,10 @@ class DashboardPage(QWidget):
 
     def refresh(self) -> None:
         self._check_qbt_async()
+        media_path = self._cfg.get("qbittorrent", {}).get("save_path", "").strip().strip('"').strip("'")
+        if media_path and Path(media_path).exists():
+            sync_local_subscriptions(media_path)
+
         subs = get_all_subscriptions_flat()
         cur_q = current_quarter()
         self.card_quarter.set_value(cur_q)
@@ -178,7 +182,6 @@ class DashboardPage(QWidget):
             self.sub_table.setItem(i, 3, QTableWidgetItem(s.get("rss_url", "")))
         self.sub_table.resizeColumnsToContents()
 
-        media_path = self._cfg.get("qbittorrent", {}).get("save_path", "").strip().strip('"').strip("'")
         rows = []
         if media_path and Path(media_path).exists():
             folders = scan_media_directory(media_path)
