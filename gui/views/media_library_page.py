@@ -630,7 +630,8 @@ class MediaLibraryPage(QWidget):
         self._cover_seq += 1
         cover_seq = self._cover_seq
         folders = [r.folder for r in rows]
-        worker = Worker(batch_folder_cover_bytes, folders, allow_network=True)
+        # 仅读本地缓存：已有封面秒出，不为联网抓取卡首屏；缺的交给后台并行同步。
+        worker = Worker(batch_folder_cover_bytes, folders, allow_network=False)
         self._active_workers.append(worker)
         worker.signals.result.connect(lambda cover_map, seq=cover_seq: self._on_covers_loaded(cover_map, seq))
         worker.signals.error.connect(lambda text, seq=cover_seq: self._on_cover_error(text, seq))
