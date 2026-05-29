@@ -21,7 +21,7 @@ class ConfigService:
                 "resource_check": {"recent_weeks": 4},
                 "cleanup": {"keep_quarters": 2, "delete_files": True},
                 "advanced": {"use_mirror": False, "request_delay": 1.0},
-                "ui": {"theme": "night", "auto_refresh_enabled": False, "auto_refresh_seconds": 30},
+                "ui": {"theme": "ios_white", "auto_refresh_enabled": False, "auto_refresh_seconds": 30},
             }
 
     @staticmethod

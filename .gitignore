@@ -23,6 +23,7 @@ watch_history.json
 potplayer_plays.txt
 plan.md
 launcher.log
+crash.log
 
 # Local-only build artifacts
 release/

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QThreadPool
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -10,7 +12,9 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -18,6 +22,7 @@ from PyQt6.QtWidgets import (
 from gui.qt.workers import Worker
 from gui.services.config_service import ConfigService
 from src.qbt.client import QBTClient
+from src.utils.runtime_paths import APP_ROOT
 
 
 class OnboardingDialog(QDialog):
@@ -30,7 +35,8 @@ class OnboardingDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("欢迎使用 — 快速设置")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(640)
+        self.setMinimumHeight(560)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self._cfg = ConfigService.load()
         self._thread_pool = QThreadPool.globalInstance()
@@ -38,8 +44,23 @@ class OnboardingDialog(QDialog):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setSpacing(16)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.stack = QStackedWidget()
+        outer.addWidget(self.stack)
+        self.stack.addWidget(self._build_form_page())   # page 0：填信息
+        self.stack.addWidget(self._build_guide_page())  # page 1：图文指引
+        self.stack.setCurrentIndex(0)
+
+        # 端口探测随输入实时刷新
+        self.host_edit.textChanged.connect(self._update_qbt_probe_status)
+        self.port_spin.valueChanged.connect(lambda _v: self._update_qbt_probe_status())
+        self._update_qbt_probe_status()
+
+    def _build_form_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setSpacing(14)
         root.setContentsMargins(24, 20, 24, 20)
 
         # ── 欢迎标题 ──
@@ -48,22 +69,21 @@ class OnboardingDialog(QDialog):
         root.addWidget(welcome)
 
         hint = QLabel(
-            "只需填写下面几项基本信息，即可开始使用。\n"
-            "所有设置之后都可以在「⚙️ 设置」页面随时修改。"
+            "填好 qBittorrent 连接信息即可开始使用，所有设置之后都能在「⚙️ 设置」里改。"
         )
         hint.setObjectName("hint-text")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
-        install_tip = QLabel(
-            '还没装 qBittorrent？'
-            '<a href="https://www.qbittorrent.org/download">点这里下载 qBittorrent</a>。<br>'
-            '安装后请在 qBittorrent 打开：工具 → 选项 → Web UI，勾选“启用 Web 用户界面”。'
+        from gui.themes import current
+        accent = current()["accent"]
+        guide_link = QLabel(
+            f'<a href="#guide" style="color:{accent};text-decoration:none;font-weight:600;">'
+            "🐾 不知道怎么做？来看看指引喵~</a>"
         )
-        install_tip.setObjectName("hint-text")
-        install_tip.setWordWrap(True)
-        install_tip.setOpenExternalLinks(True)
-        root.addWidget(install_tip)
+        guide_link.setObjectName("hint-text")
+        guide_link.linkActivated.connect(lambda _: self.stack.setCurrentIndex(1))
+        root.addWidget(guide_link)
 
         # ── qBittorrent 连接 ──
         qbt_group = QGroupBox("qBittorrent 连接信息")
@@ -111,7 +131,16 @@ class OnboardingDialog(QDialog):
         )
         save_path_label = QLabel("下载保存路径")
         save_path_label.setToolTip("番剧下载到哪个文件夹，同时也是媒体库的扫描目录")
-        qbt_form.addRow(save_path_label, self.save_path_edit)
+        save_path_row = QHBoxLayout()
+        save_path_row.setContentsMargins(0, 0, 0, 0)
+        save_path_row.addWidget(self.save_path_edit, stretch=1)
+        browse_btn = QPushButton("📂 浏览")
+        browse_btn.setToolTip("选择下载保存文件夹")
+        browse_btn.clicked.connect(self._browse_save_path)
+        save_path_row.addWidget(browse_btn)
+        save_path_wrap = QWidget()
+        save_path_wrap.setLayout(save_path_row)
+        qbt_form.addRow(save_path_label, save_path_wrap)
 
         root.addWidget(qbt_group)
 
@@ -133,15 +162,6 @@ class OnboardingDialog(QDialog):
         test_row.addStretch(1)
         root.addLayout(test_row)
 
-        # ── 提示信息 ──
-        tip = QLabel(
-            "💡 如果不确定 qBittorrent 设置，请先打开 qBittorrent → 工具 → 设置 → Web UI，\n"
-            "确认已勾选「启用 Web 用户界面」并记下端口号。"
-        )
-        tip.setObjectName("hint-text")
-        tip.setWordWrap(True)
-        root.addWidget(tip)
-
         # ── 底部按钮 ──
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -154,10 +174,81 @@ class OnboardingDialog(QDialog):
         btn_row.addWidget(self.skip_btn)
         btn_row.addWidget(self.ok_btn)
         root.addLayout(btn_row)
+        return page
 
-        self.host_edit.textChanged.connect(self._update_qbt_probe_status)
-        self.port_spin.valueChanged.connect(lambda _v: self._update_qbt_probe_status())
-        self._update_qbt_probe_status()
+    def _build_guide_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setSpacing(12)
+        root.setContentsMargins(24, 20, 24, 20)
+
+        title = QLabel("📖  qBittorrent 配置指引")
+        title.setObjectName("page-title")
+        root.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        bl = QVBoxLayout(body)
+        bl.setSpacing(10)
+        bl.setContentsMargins(0, 0, 0, 0)
+
+        steps = QLabel(
+            "1. 打开 qBittorrent → 工具 → 选项 → Web UI\n"
+            "2. 勾选「启用 Web 用户界面（远程控制）」\n"
+            "3. 记下端口（默认 8080）、用户名、密码\n"
+            "4. 返回上一页填入这些信息，点「测试连接」确认\n\n"
+            "还没装 qBittorrent？"
+        )
+        steps.setObjectName("hint-text")
+        steps.setWordWrap(True)
+        bl.addWidget(steps)
+
+        from gui.themes import current
+        accent = current()["accent"]
+        dl = QLabel(
+            f'<a href="https://www.qbittorrent.org/download" style="color:{accent};font-weight:600;">'
+            "⬇️ 点这里下载 qBittorrent</a>"
+        )
+        dl.setObjectName("hint-text")
+        dl.setOpenExternalLinks(True)
+        bl.addWidget(dl)
+
+        # 截图（打包未含图时静默跳过）
+        for img in ("qbt-main-entry-step.png", "qbt-webui-step.png"):
+            p = APP_ROOT / "docs" / "images" / img
+            if not p.exists():
+                continue
+            pix = QPixmap(str(p))
+            if pix.isNull():
+                continue
+            shot = QLabel()
+            shot.setPixmap(pix.scaledToWidth(580, Qt.TransformationMode.SmoothTransformation))
+            bl.addWidget(shot)
+            zoom = QLabel(
+                f'<a href="{p.as_uri()}" style="color:{accent};">🔍 看不清？点这里看高清大图</a>'
+            )
+            zoom.setObjectName("hint-text")
+            zoom.setOpenExternalLinks(True)
+            bl.addWidget(zoom)
+
+        bl.addStretch(1)
+        scroll.setWidget(body)
+        root.addWidget(scroll, stretch=1)
+
+        back_btn = QPushButton("← 我填好了，返回填写")
+        back_btn.setObjectName("back-btn")
+        back_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        root.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        return page
+
+    def _browse_save_path(self) -> None:
+        start = self.save_path_edit.text().strip().strip('"').strip("'")
+        path = QFileDialog.getExistingDirectory(self, "选择下载保存文件夹", start or "")
+        if path:
+            self.save_path_edit.setText(path.replace("/", "\\"))
 
     def _test_connection(self) -> None:
         self.test_status.setText("连接中...")

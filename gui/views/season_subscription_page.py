@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QToolButton,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.qt.workers import Worker
+from gui.services.config_service import ConfigService
 from gui.services.cover_service import bytes_to_pixmap, fetch_cover_bytes
 from gui.services.subscription_service import (
     SeasonAnimeItem,
@@ -57,18 +59,47 @@ class SeasonSubscriptionPage(QWidget):
         self._dataset: SeasonDataset | None = None
         self._failed_titles: set[str] = set()
         self._active_workers: list[Worker] = []
-        self._current_quarter: str = current_quarter()
+        self._loading: bool = False
+        self._current_quarter: str = self._initial_quarter()
         self._last_cols: int = 0
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(120)
         self._resize_timer.timeout.connect(self._on_resize_stable)
+        # 加载进度（模拟进度条 + 预计时间）
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(200)
+        self._progress_timer.timeout.connect(self._tick_progress)
+        self._load_elapsed_ms = 0
+        self._load_est_ms = 38000  # 首次未缓存约 30-40s，命中缓存会提前结束
         self._build_ui()
-        self._rebuild_quarter_menu()
-        self._sync_to_current()
+        self._rebuild_quarter_menu()  # also refreshes button text + current-season button state
 
     def apply_config(self, config: dict) -> None:
         self._cfg = config
+
+    # ── 上次季度记忆 ──────────────────────────────────────────
+
+    def _initial_quarter(self) -> str:
+        """启动时优先恢复上次停留的季度，否则回到当前季度。"""
+        saved = (self._cfg.get("ui") or {}).get("last_quarter")
+        if (
+            isinstance(saved, str)
+            and len(saved) == 6
+            and saved[:4].isdigit()
+            and saved[4] == "Q"
+            and saved[5].isdigit()
+        ):
+            return saved
+        return current_quarter()
+
+    def _persist_last_quarter(self, quarter: str) -> None:
+        """把当前季度写入配置，下次启动恢复（写盘失败不影响 UI）。"""
+        try:
+            self._cfg.setdefault("ui", {})["last_quarter"] = quarter
+            ConfigService.save(self._cfg)
+        except Exception:
+            pass
 
     # ── 季度选择器（年份级联菜单）────────────────────────────
 
@@ -89,11 +120,13 @@ class SeasonSubscriptionPage(QWidget):
         self.quarter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         top.addWidget(self.quarter_btn)
 
-        self.load_btn = QPushButton("🔄 加载番单")
-        self.load_btn.clicked.connect(self.refresh_async)
-        top.addWidget(self.load_btn)
+        self.current_season_btn = QPushButton("⟲ 回到当前季度")
+        self.current_season_btn.setToolTip("跳转到当前最新季度番单")
+        self.current_season_btn.clicked.connect(self._jump_to_current)
+        top.addWidget(self.current_season_btn)
+
         self.refresh_cache_btn = QPushButton("🗑 刷新缓存")
-        self.refresh_cache_btn.setToolTip("清除 yuc.wiki 番单和蜜柑索引缓存，下次加载将重新爬取")
+        self.refresh_cache_btn.setToolTip("清除 yuc.wiki 番单和蜜柑索引缓存，重新爬取并加载")
         self.refresh_cache_btn.clicked.connect(self._refresh_cache)
         top.addWidget(self.refresh_cache_btn)
         top.addStretch(1)
@@ -110,7 +143,7 @@ class SeasonSubscriptionPage(QWidget):
         filters.addWidget(self.hide_subbed)
         root.addLayout(filters)
 
-        self.status_lbl = QLabel("点击「加载番单」开始")
+        self.status_lbl = QLabel("加载中…")
         self.status_lbl.setObjectName("status-text")
         root.addWidget(self.status_lbl)
 
@@ -131,6 +164,29 @@ class SeasonSubscriptionPage(QWidget):
         notif_row.addWidget(self.notif_close_btn)
         self.notif_frame.setVisible(False)
         root.addWidget(self.notif_frame)
+
+        # 加载提示（含进度条 + 预计时间，默认隐藏）
+        self.loading_frame = QFrame()
+        self.loading_frame.setObjectName("loading-frame")
+        load_box = QVBoxLayout(self.loading_frame)
+        load_box.setContentsMargins(20, 28, 20, 28)
+        load_box.setSpacing(12)
+        load_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.loading_msg = QLabel("🐾  追番姬正在努力加载中，耐心等待下喵~")
+        self.loading_msg.setObjectName("loading-msg")
+        self.loading_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        load_box.addWidget(self.loading_msg)
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setRange(0, 100)
+        self.loading_bar.setValue(0)
+        self.loading_bar.setFixedWidth(360)
+        load_box.addWidget(self.loading_bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.loading_eta = QLabel("")
+        self.loading_eta.setObjectName("loading-eta")
+        self.loading_eta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        load_box.addWidget(self.loading_eta)
+        self.loading_frame.setVisible(False)
+        root.addWidget(self.loading_frame)
 
         # 卡片区
         self.scroll = QScrollArea()
@@ -166,30 +222,84 @@ class SeasonSubscriptionPage(QWidget):
         # Top-level shortcut to current quarter
         menu.addSeparator()
         jump = menu.addAction(f"⟲  跳到当前季度（{_quarter_label(cur_q)}）")
-        jump.triggered.connect(self._sync_to_current)
+        jump.triggered.connect(self._jump_to_current)
         self.quarter_btn.setMenu(menu)
         self._update_quarter_btn_text()
 
     def _update_quarter_btn_text(self) -> None:
         cur_q = current_quarter()
-        if self._current_quarter == cur_q:
+        on_current = self._current_quarter == cur_q
+        if on_current:
             self.quarter_btn.setText(f"📅  {_quarter_label(self._current_quarter)}  ●  ▾")
         else:
             self.quarter_btn.setText(f"📅  {_quarter_label(self._current_quarter)}  ▾")
+        # 已在当前季度（或正在加载）时禁用「回到当前季度」按钮
+        if hasattr(self, "current_season_btn"):
+            self.current_season_btn.setEnabled(not on_current and not self._loading)
 
     def _select_quarter(self, q: str) -> None:
         self._current_quarter = q
         self._update_quarter_btn_text()
+        self._persist_last_quarter(q)
+        self.refresh_async()  # 切换季度后自动加载
 
     def _sync_to_current(self) -> None:
         self._current_quarter = current_quarter()
         self._update_quarter_btn_text()
+        self._persist_last_quarter(self._current_quarter)
+
+    def _jump_to_current(self) -> None:
+        """回到当前季度并自动加载。"""
+        self._sync_to_current()
+        self.refresh_async()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # 首次显示（或缓存清空后）自动加载，免去手动「加载番单」
+        if self._dataset is None and not self._loading:
+            QTimer.singleShot(0, self.refresh_async)
+
+    def _set_busy(self, busy: bool) -> None:
+        """加载/订阅期间禁用交互控件，防止并发请求。"""
+        self._loading = busy
+        self.quarter_btn.setEnabled(not busy)
+        self.refresh_cache_btn.setEnabled(not busy)
+        self.current_season_btn.setEnabled(
+            not busy and self._current_quarter != current_quarter()
+        )
+
+    # ── 加载提示 / 模拟进度 ────────────────────────────────────
+
+    def _start_loading_ui(self) -> None:
+        """清屏并展示「追番姬加载中」提示 + 进度条。"""
+        self._clear_cards()
+        self._load_elapsed_ms = 0
+        self.loading_bar.setValue(0)
+        self.loading_eta.setText(
+            f"预计还需 ~{self._load_est_ms // 1000} 秒（首次较慢，之后走缓存秒开）"
+        )
+        self.loading_frame.setVisible(True)
+        self._progress_timer.start()
+
+    def _tick_progress(self) -> None:
+        self._load_elapsed_ms += self._progress_timer.interval()
+        pct = min(95, int(self._load_elapsed_ms / self._load_est_ms * 100))
+        self.loading_bar.setValue(pct)
+        if self._load_elapsed_ms >= self._load_est_ms:
+            self.loading_eta.setText("就快好了喵~ 马上就来")
+        else:
+            remain = (self._load_est_ms - self._load_elapsed_ms) // 1000
+            self.loading_eta.setText(f"预计还需 ~{remain} 秒")
+
+    def _stop_loading_ui(self) -> None:
+        self._progress_timer.stop()
+        self.loading_bar.setValue(100)
+        self.loading_frame.setVisible(False)
 
     # ── 缓存刷新 ──────────────────────────────────────────────
 
     def _refresh_cache(self) -> None:
-        self.load_btn.setEnabled(False)
-        self.refresh_cache_btn.setEnabled(False)
+        self._set_busy(True)
         self.status_lbl.setText("清理缓存中...")
         worker = Worker(clear_season_caches)
         self._active_workers.append(worker)
@@ -200,28 +310,29 @@ class SeasonSubscriptionPage(QWidget):
         self._thread_pool.start(worker)
 
     def _on_cache_cleared(self) -> None:
-        self.load_btn.setEnabled(True)
-        self.refresh_cache_btn.setEnabled(True)
-        self.status_lbl.setText("缓存已清除，点击「加载番单」重新加载")
+        self._set_busy(False)
+        self.status_lbl.setText("缓存已清除，正在重新加载…")
         self._dataset = None
         self._failed_titles.clear()
         self._clear_cards()
+        self.refresh_async()  # 自动重新加载
 
     # ── 数据加载 ──────────────────────────────────────────────
 
     def refresh_async(self) -> None:
         quarter = self._current_quarter
-        if not quarter:
+        if not quarter or self._loading:
             return
-        self.load_btn.setEnabled(False)
+        self._set_busy(True)
         self.notif_frame.setVisible(False)
-        self.status_lbl.setText(f"正在加载 {quarter} 番单（首次约 30-40 秒，之后走缓存）...")
+        self._start_loading_ui()
+        self.status_lbl.setText(f"正在加载 {quarter} 番单...")
         worker = Worker(build_season_dataset, self._cfg, quarter)
         self._active_workers.append(worker)
         worker.signals.result.connect(self._on_dataset_loaded)
         worker.signals.error.connect(self._on_error)
         worker.signals.finished.connect(lambda w=worker: (
-            self.load_btn.setEnabled(True),
+            self._set_busy(False),
             self._active_workers.remove(w) if w in self._active_workers else None,
         ))
         self._thread_pool.start(worker)
@@ -267,6 +378,7 @@ class SeasonSubscriptionPage(QWidget):
             list(pool.map(fetch_cover_bytes, urls))
 
     def _finish_render(self) -> None:
+        self._stop_loading_ui()
         if not self._dataset:
             return
         n_subbed = sum(1 for it in self._dataset.items if it.subscribed)
@@ -276,9 +388,10 @@ class SeasonSubscriptionPage(QWidget):
         self._render_cards()
 
     def _on_error(self, text: str) -> None:
+        self._stop_loading_ui()
         QMessageBox.critical(self, "加载失败", text)
         self.status_lbl.setText("加载失败")
-        self.load_btn.setEnabled(True)
+        self._set_busy(False)
 
     # ── 卡片渲染 ──────────────────────────────────────────────
 
@@ -398,7 +511,7 @@ class SeasonSubscriptionPage(QWidget):
                 return
 
         self.status_lbl.setText(f"{'取消订阅' if item.subscribed else '订阅'}中：{item.title}")
-        self.load_btn.setEnabled(False)
+        self._set_busy(True)
 
         if item.subscribed:
             worker = Worker(unsubscribe_title, self._cfg, quarter, item.title, True)
@@ -411,7 +524,7 @@ class SeasonSubscriptionPage(QWidget):
         worker.signals.result.connect(partial(self._on_toggle_done, item))
         worker.signals.error.connect(self._on_error)
         worker.signals.finished.connect(lambda w=worker: (
-            self.load_btn.setEnabled(True),
+            self._set_busy(False),
             self._active_workers.remove(w) if w in self._active_workers else None,
         ))
         self._thread_pool.start(worker)
@@ -430,7 +543,7 @@ class SeasonSubscriptionPage(QWidget):
 
         search_term = text.strip()
         self.status_lbl.setText(f"重试订阅中：{item.title}（搜索词：{search_term}）")
-        self.load_btn.setEnabled(False)
+        self._set_busy(True)
 
         worker = Worker(
             subscribe_title,
@@ -441,7 +554,7 @@ class SeasonSubscriptionPage(QWidget):
         worker.signals.result.connect(partial(self._on_toggle_done, item))
         worker.signals.error.connect(self._on_error)
         worker.signals.finished.connect(lambda w=worker: (
-            self.load_btn.setEnabled(True),
+            self._set_busy(False),
             self._active_workers.remove(w) if w in self._active_workers else None,
         ))
         self._thread_pool.start(worker)

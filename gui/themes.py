@@ -197,6 +197,21 @@ QLabel#test-status[status="ok"]    {{ color: {c['success']}; }}
 QLabel#test-status[status="error"] {{ color: {c['error']}; }}
 QLabel#test-status[status="idle"]  {{ color: {c['subtext']}; }}
 
+QFrame#pp-hint {{
+    background: {c['card']}; border: 1px solid {c['warning']};
+    border-radius: 6px;
+}}
+QPushButton#pp-hint-btn {{
+    background: transparent; border: none; text-align: left;
+    color: {c['warning']}; padding: 4px 2px; min-height: 20px;
+    font-weight: 600;
+}}
+QPushButton#pp-hint-btn:hover {{ color: {c['warning']}; text-decoration: underline; }}
+
+QFrame#loading-frame {{ background: transparent; }}
+QLabel#loading-msg {{ font-size: 16px; font-weight: 600; color: {c['text']}; }}
+QLabel#loading-eta {{ color: {c['subtext']}; font-size: 12px; }}
+
 QLabel#page-title  {{ font-size: 22px; font-weight: 700; }}
 QLabel#section-header {{ font-size: 15px; font-weight: 600; color: {c['subtext']}; }}
 QLabel#day-header  {{ font-size: 14px; font-weight: 700; }}
@@ -306,7 +321,7 @@ THEMES: dict[str, dict] = {
     "light_pink": {"label": "浅粉",   "colors": _PINK,  "qss": _qss(_PINK)},
 }
 
-DEFAULT_THEME = "night"
+DEFAULT_THEME = "ios_white"
 _current_name: str = DEFAULT_THEME
 
 

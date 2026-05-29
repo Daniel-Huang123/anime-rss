@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from PyQt6.QtCore import QThreadPool, QTimer, Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QThreadPool, QTimer, Qt, QUrl
+from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -20,11 +20,13 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.qt.workers import Worker
+from gui.services.config_service import ConfigService
 from gui.services.cover_service import bytes_to_pixmap, folder_cover_bytes
 from gui.services.media_service import AnimeRow, build_media_rows
 from gui.themes import repolish
 from gui.views.widgets.cover_card import CoverCard
 from src.utils.file_parser import AnimeFolder
+from src.utils.potplayer import detect_potplayer, play_media
 from src.utils.watch_progress import (
     get_recently_played,
     get_watch_status,
@@ -218,7 +220,7 @@ class EpisodeDetailPage(QWidget):
     def _open_file(self, path: Path) -> None:
         try:
             record_played(path)
-            os.startfile(str(path))  # type: ignore[attr-defined]
+            play_media(path, self._parent._cfg)
             # reload to update watched marks
             if self._row:
                 QTimer.singleShot(500, lambda: self.load(self._row) if self._row else None)
@@ -388,6 +390,46 @@ class MediaLibraryPage(QWidget):
         self.scroll.setWidget(self.cards_host)
         root.addWidget(self.scroll, stretch=1)
 
+        # ── PotPlayer 缺失提示（行内展开，默认隐藏）──
+        self.pp_hint = QFrame()
+        self.pp_hint.setObjectName("pp-hint")
+        pp_v = QVBoxLayout(self.pp_hint)
+        pp_v.setContentsMargins(12, 8, 12, 8)
+        pp_v.setSpacing(8)
+        self.pp_hint_btn = QPushButton(self._pp_hint_text(False))
+        self.pp_hint_btn.setObjectName("pp-hint-btn")
+        self.pp_hint_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pp_hint_btn.clicked.connect(self._toggle_pp_detail)
+        pp_v.addWidget(self.pp_hint_btn)
+
+        self.pp_detail = QWidget()
+        pp_d = QVBoxLayout(self.pp_detail)
+        pp_d.setContentsMargins(0, 0, 0, 0)
+        pp_d.setSpacing(8)
+        pp_desc = QLabel("进度追踪需要 PotPlayer 写入播放记录。定位到 PotPlayer.exe 后即可正常追踪。")
+        pp_desc.setObjectName("hint-text")
+        pp_desc.setWordWrap(True)
+        pp_d.addWidget(pp_desc)
+        pp_actions = QHBoxLayout()
+        self.pp_locate_btn = QPushButton("📂 定位 PotPlayer.exe")
+        self.pp_locate_btn.clicked.connect(self._locate_potplayer)
+        self.pp_download_btn = QPushButton("⬇️ 下载 PotPlayer")
+        self.pp_download_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://potplayer.tv/"))
+        )
+        self.pp_guide_btn = QPushButton("📖 查看教程")
+        self.pp_guide_btn.clicked.connect(self._show_pp_guide)
+        pp_actions.addWidget(self.pp_locate_btn)
+        pp_actions.addWidget(self.pp_download_btn)
+        pp_actions.addWidget(self.pp_guide_btn)
+        pp_actions.addStretch(1)
+        pp_d.addLayout(pp_actions)
+        self.pp_detail.setVisible(False)
+        pp_v.addWidget(self.pp_detail)
+
+        self.pp_hint.setVisible(False)
+        root.addWidget(self.pp_hint)
+
         self.stack.addWidget(self.grid_page)
 
         # ── Page 1: detail view ──
@@ -402,6 +444,55 @@ class MediaLibraryPage(QWidget):
         self.path_label.setText(f"媒体目录：{media_path or '（未配置）'}")
         auto = bool(config.get("ui", {}).get("auto_refresh_enabled", False))
         self._reset_timer(auto, int(config.get("ui", {}).get("auto_refresh_seconds", 30) or 30))
+        self._check_potplayer()
+
+    # ── PotPlayer 缺失提示 ────────────────────────────────────
+
+    def _pp_hint_text(self, expanded: bool) -> str:
+        return f"🐾 追番姬找不到 PotPlayer，媒体库功能会受限哦~ 点我更新路径  {'▴' if expanded else '▾'}"
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._check_potplayer()
+
+    def _check_potplayer(self) -> None:
+        """打开媒体库时检测 PotPlayer，找不到则显示底部提示条。"""
+        found = detect_potplayer(self._cfg) is not None
+        self.pp_hint.setVisible(not found)
+        if found:
+            self.pp_detail.setVisible(False)
+            self.pp_hint_btn.setText(self._pp_hint_text(False))
+
+    def _toggle_pp_detail(self) -> None:
+        show = not self.pp_detail.isVisible()
+        self.pp_detail.setVisible(show)
+        self.pp_hint_btn.setText(self._pp_hint_text(show))
+
+    def _locate_potplayer(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "定位 PotPlayer.exe", "",
+            "PotPlayer (PotPlayer*.exe);;可执行文件 (*.exe)",
+        )
+        if not path:
+            return
+        self._cfg.setdefault("ui", {})["potplayer_path"] = path
+        try:
+            ConfigService.save(self._cfg)
+        except Exception:
+            pass
+        self._check_potplayer()
+        self.status_label.setText("已设置 PotPlayer 路径 ✓")
+
+    def _show_pp_guide(self) -> None:
+        QMessageBox.information(
+            self, "配置 PotPlayer",
+            "1. 安装 PotPlayer（64 位）：potplayer.tv\n"
+            "2. 打开 PotPlayer → 选项 → 播放 → 播放列表 →\n"
+            "   勾选「保存最近播放记录」\n"
+            "3. 回到这里点「📂 定位 PotPlayer.exe」，选择安装目录下的\n"
+            "   PotPlayerMini64.exe\n\n"
+            "之后从媒体库点击播放，追番姬就能自动追踪你的观看进度喵~",
+        )
 
     def _reset_timer(self, enabled: bool, seconds: int) -> None:
         self._refresh_timer.stop()
@@ -525,7 +616,7 @@ class MediaLibraryPage(QWidget):
             return
         try:
             record_played(path)
-            os.startfile(str(path))  # type: ignore[attr-defined]
+            play_media(path, self._cfg)
             QTimer.singleShot(800, self.refresh_async)
         except Exception as exc:
             QMessageBox.warning(self, "播放失败", str(exc))
