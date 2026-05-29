@@ -132,6 +132,28 @@ def _apply_discovered_subscriptions(
     return added
 
 
+def _prune_orphan_local(data: dict, root: Path) -> int:
+    """删除文件夹已不存在的「纯本地」恢复条目（recovered_local 且无 rss_url）。
+
+    这类条目来自历史扫描（如曾误扫到项目目录，把文件夹名当成番名），文件早已不在。
+    带 rss_url 的（被 qB 规则补全过的）视为真实订阅，无论是否已下载都保留。
+    仅在 root 存在时调用，按 root/quarter/title 或 root/title 判断文件夹是否还在。
+    """
+    removed = 0
+    for quarter, subs in list(data.get("subscriptions", {}).items()):
+        kept: list[dict] = []
+        for item in subs:
+            if item.get("recovered_local") and not str(item.get("rss_url", "")).strip():
+                title = str(item.get("title", "")).strip()
+                if title and not (root / quarter / title).exists() and not (root / title).exists():
+                    removed += 1
+                    continue
+            kept.append(item)
+        if len(kept) != len(subs):
+            data["subscriptions"][quarter] = kept
+    return removed
+
+
 def _backfill_local_subgroups(
     data: dict, subgroups: dict[tuple[str, str], str]
 ) -> int:
@@ -233,8 +255,9 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
     subgroups = {key: c.most_common(1)[0][0] for key, c in sg_counts.items()}
     added = _apply_discovered_subscriptions(data, existing, discovered, subgroups)
     backfilled = _backfill_local_subgroups(data, subgroups)
+    orphans = _prune_orphan_local(data, root)
 
-    if added or pruned or backfilled:
+    if added or pruned or backfilled or orphans:
         _save(data)
     return added
 
@@ -285,7 +308,8 @@ def sync_local_subscriptions_from_folders(
 
     added = _apply_discovered_subscriptions(data, existing, discovered, subgroups)
     backfilled = _backfill_local_subgroups(data, subgroups)
-    if added or pruned or backfilled:
+    orphans = _prune_orphan_local(data, root)
+    if added or pruned or backfilled or orphans:
         _save(data)
     return added
 

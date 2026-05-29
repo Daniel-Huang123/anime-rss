@@ -300,6 +300,39 @@ def test_sync_from_folders_backfills_subgroup_on_existing_local(tmp_state, tmp_p
     assert sub["subgroup_name"] == "kirara"  # 已回填
 
 
+def test_sync_prunes_orphan_local_but_keeps_real(tmp_state, tmp_path, monkeypatch):
+    """文件已不存在的纯本地条目被清除；带 rss 的、或文件还在的保留。"""
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    raw = json.loads(tmp_state.read_text(encoding="utf-8"))
+    raw["subscriptions"]["2026Q2"] = [
+        # 孤儿：纯本地、文件夹不存在 → 应删
+        {"title": "anime-rss", "bangumi_id": 0, "subgroup_id": 0, "subgroup_name": "local",
+         "rss_url": "", "qbt_feed_path": "2026Q2/anime-rss", "added_at": "2026-05-01",
+         "cover_url": None, "bgm_id": None, "recovered_local": True},
+        # 带 rss 的恢复条目：即使文件未下载也保留
+        {"title": "有RSS的番", "bangumi_id": 9, "subgroup_id": 1, "subgroup_name": "ANi",
+         "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=9", "qbt_feed_path": "2026Q2/有RSS的番",
+         "added_at": "2026-05-01", "recovered_local": True},
+    ]
+    tmp_state.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    root = tmp_path / "media"
+    # 真实存在的本地番（应被发现并保留）
+    (root / "2026Q2" / "真实番").mkdir(parents=True, exist_ok=True)
+    (root / "2026Q2" / "真实番" / "01.mkv").write_bytes(b"x")
+
+    sync_local_subscriptions(root)
+
+    titles = {s["title"] for s in get_subscriptions("2026Q2")["2026Q2"]}
+    assert "anime-rss" not in titles          # 孤儿已清
+    assert "有RSS的番" in titles               # 带 rss 保留
+    assert "真实番" in titles                  # 现存本地保留
+
+
 def test_sync_local_subscriptions_skips_dev_dirs(tmp_state):
     from src.utils.state import get_subscriptions, sync_local_subscriptions
 
