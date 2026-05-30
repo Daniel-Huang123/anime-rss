@@ -25,6 +25,7 @@ from gui.themes import DEFAULT_THEME, THEMES, repolish
 from gui.views.onboarding_dialog import OnboardingDialog
 from gui.views.widgets.priority_list import PriorityListEditor
 from src.qbt.client import QBTClient
+from src.utils.config import DEFAULT_SUBTITLE_PRIORITIES
 
 
 class SettingsPage(QWidget):
@@ -200,7 +201,9 @@ class SettingsPage(QWidget):
         self.user_edit.setText(str(qbt.get("username", "admin")))
         self.pass_edit.setText(str(qbt.get("password", "")))
         self.save_path_edit.setText(str(qbt.get("save_path", "")))
-        self.priority_editor.set_items(self._cfg.get("subtitle_priorities", ["ANi", "kirara"]))
+        self.priority_editor.set_items(
+            self._cfg.get("subtitle_priorities") or list(DEFAULT_SUBTITLE_PRIORITIES)
+        )
         self.recent_weeks_spin.setValue(int(self._cfg.get("resource_check", {}).get("recent_weeks", 4)))
         self.keep_quarters_spin.setValue(int(self._cfg.get("cleanup", {}).get("keep_quarters", 2)))
         self.delete_files_check.setChecked(bool(self._cfg.get("cleanup", {}).get("delete_files", True)))

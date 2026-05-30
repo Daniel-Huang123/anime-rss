@@ -4,7 +4,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
-from PyQt6.QtCore import QThreadPool, QTimer, Qt, QUrl
+from PyQt6.QtCore import QThreadPool, QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -40,6 +40,7 @@ from gui.services.subscription_service import (
 from gui.themes import SEASON_LABELS
 from gui.views.widgets.cover_card import CoverCard
 from src.utils.season import current_quarter, list_season_options
+from src.utils.state import get_subscriptions
 
 _DAY_ORDER = ["周一", "周二", "周三", "周四", "周五", "周六", "周日", "其他"]
 _CARD_W = 170  # 160px card + 10px spacing
@@ -51,6 +52,9 @@ def _quarter_label(q: str) -> str:
 
 
 class SeasonSubscriptionPage(QWidget):
+    # 订阅/取消订阅成功后发出，供媒体库重新解析封面
+    subscription_changed = pyqtSignal()
+
     def __init__(self, config: dict) -> None:
         super().__init__()
         self._cfg = config
@@ -60,6 +64,9 @@ class SeasonSubscriptionPage(QWidget):
         self._quarter_timer.start(10 * 60 * 1000)
         self._dataset: SeasonDataset | None = None
         self._failed_titles: set[str] = set()
+        self._grid_rendered: bool = False
+        self._silent_load: bool = False
+        self._cover_prefetch_seq: int = 0
         self._active_workers: list[Worker] = []
         self._loading: bool = False
         self._current_quarter: str = self._initial_quarter()
@@ -74,11 +81,25 @@ class SeasonSubscriptionPage(QWidget):
         self._progress_timer.timeout.connect(self._tick_progress)
         self._load_elapsed_ms = 0
         self._load_est_ms = 38000  # 首次未缓存约 30-40s，命中缓存会提前结束
+        self._filter_save_timer = QTimer(self)
+        self._filter_save_timer.setSingleShot(True)
+        self._filter_save_timer.setInterval(300)
+        self._filter_save_timer.timeout.connect(self._persist_filter_state)
         self._build_ui()
+        self._restore_filter_state()
         self._rebuild_quarter_menu()  # also refreshes button text + current-season button state
+        # 启动即后台预加载番单，不必等用户点进本页才开始（失败静默，访问时再报错）
+        QTimer.singleShot(0, self._preload)
+
+    def _preload(self) -> None:
+        if self._dataset is not None or self._loading:
+            return
+        self._silent_load = True
+        self.refresh_async()
 
     def apply_config(self, config: dict) -> None:
         self._cfg = config
+        self._restore_filter_state()
 
     # ── 上次季度记忆 ──────────────────────────────────────────
 
@@ -102,6 +123,38 @@ class SeasonSubscriptionPage(QWidget):
             ConfigService.save(self._cfg)
         except Exception:
             pass
+
+    def _restore_filter_state(self) -> None:
+        ui_cfg = self._cfg.setdefault("ui", {})
+        text = str(ui_cfg.get("season_search_text", "") or "")
+        hide_subbed = bool(ui_cfg.get("season_hide_subbed", False))
+
+        self.search_edit.blockSignals(True)
+        self.hide_subbed.blockSignals(True)
+        self.search_edit.setText(text)
+        self.hide_subbed.setChecked(hide_subbed)
+        self.search_edit.blockSignals(False)
+        self.hide_subbed.blockSignals(False)
+
+        if self._dataset:
+            self._render_cards()
+
+    def _persist_filter_state(self) -> None:
+        try:
+            ui_cfg = self._cfg.setdefault("ui", {})
+            ui_cfg["season_search_text"] = self.search_edit.text()
+            ui_cfg["season_hide_subbed"] = self.hide_subbed.isChecked()
+            ConfigService.save(self._cfg)
+        except Exception:
+            pass
+
+    def _on_search_text_changed(self, _text: str) -> None:
+        self._render_cards()
+        self._filter_save_timer.start()
+
+    def _on_hide_subbed_toggled(self, _checked: bool) -> None:
+        self._render_cards()
+        self._filter_save_timer.start()
 
     # ── 季度选择器（年份级联菜单）────────────────────────────
 
@@ -138,9 +191,9 @@ class SeasonSubscriptionPage(QWidget):
         filters = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("🔍 输入关键词搜索...")
-        self.search_edit.textChanged.connect(self._render_cards)
+        self.search_edit.textChanged.connect(self._on_search_text_changed)
         self.hide_subbed = QCheckBox("隐藏已订阅")
-        self.hide_subbed.toggled.connect(self._render_cards)
+        self.hide_subbed.toggled.connect(self._on_hide_subbed_toggled)
         filters.addWidget(self.search_edit, stretch=1)
         filters.addWidget(self.hide_subbed)
         root.addLayout(filters)
@@ -260,6 +313,32 @@ class SeasonSubscriptionPage(QWidget):
         # 首次显示（或缓存清空后）自动加载，免去手动「加载番单」
         if self._dataset is None and not self._loading:
             QTimer.singleShot(0, self.refresh_async)
+            return
+        self.refresh_subscription_state()
+
+    def _sync_subscribed_flags(self) -> bool:
+        if not self._dataset:
+            return False
+        current_subs = get_subscriptions(self._dataset.quarter).get(self._dataset.quarter, [])
+        current_titles = {str(sub.get("title", "")).strip() for sub in current_subs}
+        changed = False
+        for item in self._dataset.items:
+            should_subscribed = item.title in current_titles
+            if item.subscribed != should_subscribed:
+                item.subscribed = should_subscribed
+                changed = True
+        return changed
+
+    def refresh_subscription_state(self) -> None:
+        if not self._dataset or self._loading:
+            return
+        if not self._sync_subscribed_flags():
+            return
+        self._render_cards()
+        n_subbed = sum(1 for it in self._dataset.items if it.subscribed)
+        self.status_lbl.setText(
+            f"{self._dataset.quarter}  共 {len(self._dataset.items)} 部 · 已订阅 {n_subbed} 部"
+        )
 
     def _set_busy(self, busy: bool) -> None:
         """加载/订阅期间禁用交互控件，防止并发请求。"""
@@ -275,6 +354,7 @@ class SeasonSubscriptionPage(QWidget):
     def _start_loading_ui(self) -> None:
         """清屏并展示「追番姬加载中」提示 + 进度条。"""
         self._clear_cards()
+        self._grid_rendered = False
         self._load_elapsed_ms = 0
         self.loading_bar.setValue(0)
         self.loading_eta.setText(
@@ -341,6 +421,7 @@ class SeasonSubscriptionPage(QWidget):
         self._thread_pool.start(worker)
 
     def _on_grid_loaded(self, dataset: SeasonDataset) -> None:
+        self._silent_load = False  # 加载成功，后续失败正常弹窗
         self._dataset = dataset
         self._failed_titles.clear()
         n_subbed = sum(1 for it in dataset.items if it.subscribed)
@@ -350,15 +431,19 @@ class SeasonSubscriptionPage(QWidget):
         # Check pending notifications
         self._check_pending_notifications(dataset.quarter)
 
-        uncached = [it.cover_url for it in dataset.items if it.cover_url]
+        uncached = list(dict.fromkeys(it.cover_url for it in dataset.items if it.cover_url))
         if uncached:
+            self._cover_prefetch_seq += 1
+            prefetch_seq = self._cover_prefetch_seq
             prefetch_worker = Worker(self._prefetch_covers_sync, uncached)
             self._active_workers.append(prefetch_worker)
             prefetch_worker.signals.error.connect(lambda _: None)
-            prefetch_worker.signals.finished.connect(lambda w=prefetch_worker: (
-                self._finish_render(),
-                self._active_workers.remove(w) if w in self._active_workers else None,
-            ))
+            prefetch_worker.signals.finished.connect(
+                lambda w=prefetch_worker, q=dataset.quarter, s=prefetch_seq: (
+                    self._on_prefetch_done(q, s),
+                    self._active_workers.remove(w) if w in self._active_workers else None,
+                )
+            )
             self._thread_pool.start(prefetch_worker)
         else:
             self._finish_render()
@@ -384,6 +469,10 @@ class SeasonSubscriptionPage(QWidget):
         self._dataset.season_index = season_index
         self._dataset.yuc_bgm_map = yuc_bgm_map
         apply_bgm_map(self._dataset, yuc_bgm_map)
+        # 首屏（封面预抓）还没渲染完时，不要抢先出网格——bgm_map 已写入 dataset，
+        # 交给 _finish_render 一次性渲染（否则会出现"番单已出但加载条还在"）。
+        if not self._grid_rendered:
+            return
         # 轻量重渲染：封面已缓存，主要为让卡片封面点击跳转 bgm 链接生效
         self._render_cards()
         n_subbed = sum(1 for it in self._dataset.items if it.subscribed)
@@ -408,6 +497,16 @@ class SeasonSubscriptionPage(QWidget):
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(fetch_cover_bytes, urls))
 
+    def _on_prefetch_done(self, quarter: str, seq: int) -> None:
+        if seq != self._cover_prefetch_seq:
+            return
+        if not self._dataset or self._dataset.quarter != quarter:
+            return
+        if not self._grid_rendered:
+            self._finish_render()
+            return
+        self._render_cards()
+
     def _finish_render(self) -> None:
         self._stop_loading_ui()
         if not self._dataset:
@@ -417,12 +516,18 @@ class SeasonSubscriptionPage(QWidget):
             f"{self._dataset.quarter}  共 {len(self._dataset.items)} 部  ·  已订阅 {n_subbed} 部"
         )
         self._render_cards()
+        self._grid_rendered = True
 
     def _on_error(self, text: str) -> None:
         self._stop_loading_ui()
+        self._set_busy(False)
+        if self._silent_load:
+            # 启动预加载失败：不打扰，留待用户进入本页时再加载/报错
+            self._silent_load = False
+            self.status_lbl.setText("番单待加载（点开本页或「重新加载」重试）")
+            return
         QMessageBox.critical(self, "加载失败", text)
         self.status_lbl.setText("加载失败")
-        self._set_busy(False)
 
     # ── 卡片渲染 ──────────────────────────────────────────────
 
@@ -480,7 +585,7 @@ class SeasonSubscriptionPage(QWidget):
             grid.setContentsMargins(0, 4, 0, 8)
 
             for idx, it in enumerate(day_items):
-                cover = bytes_to_pixmap(fetch_cover_bytes(it.cover_url))
+                cover = bytes_to_pixmap(fetch_cover_bytes(it.cover_url, allow_network=False))
                 subtitle = f"{it.broadcast_time}\n{it.episodes}"
 
                 if it.title in self._failed_titles:
@@ -600,6 +705,7 @@ class SeasonSubscriptionPage(QWidget):
                 from gui.services.subscription_service import remove_pending_check
                 remove_pending_check(self._dataset.quarter, item.title)
             self._render_cards()
+            self.subscription_changed.emit()
         else:
             if "未找到可用RSS" in msg:
                 self._failed_titles.add(item.title)

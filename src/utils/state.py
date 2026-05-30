@@ -101,17 +101,24 @@ def _prepare_subscription_index(data: dict) -> tuple[dict[str, set[str]], bool]:
     return existing, pruned
 
 
-def _apply_discovered_subscriptions(data: dict, existing: dict[str, set[str]], discovered: set[tuple[str, str]]) -> int:
+def _apply_discovered_subscriptions(
+    data: dict,
+    existing: dict[str, set[str]],
+    discovered: set[tuple[str, str]],
+    subgroups: dict[tuple[str, str], str] | None = None,
+) -> int:
+    subgroups = subgroups or {}
     added = 0
     for quarter, title in sorted(discovered):
         known_titles = existing.setdefault(quarter, set())
         if title in known_titles:
             continue
+        sg = str(subgroups.get((quarter, title), "") or "").strip()
         entry = {
             "title": title,
             "bangumi_id": 0,
             "subgroup_id": 0,
-            "subgroup_name": "local",
+            "subgroup_name": sg or "local",
             "rss_url": "",
             "qbt_feed_path": f"{quarter}/{title}",
             "added_at": date.today().isoformat(),
@@ -123,6 +130,68 @@ def _apply_discovered_subscriptions(data: dict, existing: dict[str, set[str]], d
         known_titles.add(title)
         added += 1
     return added
+
+
+def _prune_orphan_local(data: dict, root: Path) -> int:
+    """删除文件夹已不存在的「纯本地」恢复条目（recovered_local 且无 rss_url）。
+
+    这类条目来自历史扫描（如曾误扫到项目目录，把文件夹名当成番名），文件早已不在。
+    带 rss_url 的（被 qB 规则补全过的）视为真实订阅，无论是否已下载都保留。
+    仅在 root 存在时调用，按 root/quarter/title 或 root/title 判断文件夹是否还在。
+    """
+    removed = 0
+    for quarter, subs in list(data.get("subscriptions", {}).items()):
+        kept: list[dict] = []
+        for item in subs:
+            if item.get("recovered_local") and not str(item.get("rss_url", "")).strip():
+                title = str(item.get("title", "")).strip()
+                if title and not (root / quarter / title).exists() and not (root / title).exists():
+                    removed += 1
+                    continue
+            kept.append(item)
+        if len(kept) != len(subs):
+            data["subscriptions"][quarter] = kept
+    return removed
+
+
+def _backfill_local_subgroups(
+    data: dict, subgroups: dict[tuple[str, str], str]
+) -> int:
+    """给已存在的 recovered_local 记录补写从文件名解析出的字幕组。
+
+    只在原 subgroup_name 为空 / "local" 时覆盖，不动用户或订阅流程已确定的字幕组。
+    返回更新条数。
+    """
+    if not subgroups:
+        return 0
+    changed = 0
+    for quarter, subs in data.get("subscriptions", {}).items():
+        for item in subs:
+            if not item.get("recovered_local"):
+                continue
+            title = str(item.get("title", "")).strip()
+            sg = str(subgroups.get((quarter, title), "") or "").strip()
+            if not sg:
+                continue
+            cur = str(item.get("subgroup_name", "")).strip().lower()
+            if cur in {"", "local"} and item.get("subgroup_name") != sg:
+                item["subgroup_name"] = sg
+                changed += 1
+    return changed
+
+
+def _detect_folder_subgroup(folder) -> str:
+    """从一部番的剧集文件名里取出现最多的字幕组（如 [ANi] → "ANi"）。"""
+    from collections import Counter
+
+    names = [
+        str(getattr(ep, "subgroup", "") or "").strip()
+        for ep in (getattr(folder, "episodes", []) or [])
+    ]
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    return Counter(names).most_common(1)[0][0]
 
 
 def sync_local_subscriptions(media_root: Path | str) -> int:
@@ -142,6 +211,8 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
 
     fallback_quarter = current_quarter()
     discovered: set[tuple[str, str]] = set()
+    from collections import Counter
+    sg_counts: dict[tuple[str, str], Counter] = {}
 
     try:
         for file_path in root.rglob("*"):
@@ -158,6 +229,7 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
             if any((name.startswith(".") or name in _SKIP_SEGMENTS) for name in segment_names):
                 continue
 
+            parsed = parse_filename(file_path)
             quarter = fallback_quarter
             title = ""
             if len(parts) >= 2 and _QUARTER_RE.match(parts[0]):
@@ -166,7 +238,6 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
             elif len(parts) >= 2:
                 title = parts[0].strip()
             else:
-                parsed = parse_filename(file_path)
                 if parsed:
                     title = parsed.title.strip()
                 else:
@@ -175,12 +246,18 @@ def sync_local_subscriptions(media_root: Path | str) -> int:
             if not title:
                 continue
             discovered.add((quarter, title))
+            sg = str(getattr(parsed, "subgroup", "") or "").strip() if parsed else ""
+            if sg:
+                sg_counts.setdefault((quarter, title), Counter())[sg] += 1
     except PermissionError:
         pass
 
-    added = _apply_discovered_subscriptions(data, existing, discovered)
+    subgroups = {key: c.most_common(1)[0][0] for key, c in sg_counts.items()}
+    added = _apply_discovered_subscriptions(data, existing, discovered, subgroups)
+    backfilled = _backfill_local_subgroups(data, subgroups)
+    orphans = _prune_orphan_local(data, root)
 
-    if added or pruned:
+    if added or pruned or backfilled or orphans:
         _save(data)
     return added
 
@@ -203,6 +280,7 @@ def sync_local_subscriptions_from_folders(
     existing, pruned = _prepare_subscription_index(data)
     fallback_quarter = current_quarter()
     discovered: set[tuple[str, str]] = set()
+    subgroups: dict[tuple[str, str], str] = {}
 
     for folder in folders:
         title = str(getattr(folder, "title", "")).strip()
@@ -224,9 +302,14 @@ def sync_local_subscriptions_from_folders(
                 except Exception:
                     pass
         discovered.add((quarter, title))
+        sg = _detect_folder_subgroup(folder)
+        if sg:
+            subgroups[(quarter, title)] = sg
 
-    added = _apply_discovered_subscriptions(data, existing, discovered)
-    if added or pruned:
+    added = _apply_discovered_subscriptions(data, existing, discovered, subgroups)
+    backfilled = _backfill_local_subgroups(data, subgroups)
+    orphans = _prune_orphan_local(data, root)
+    if added or pruned or backfilled or orphans:
         _save(data)
     return added
 
@@ -367,6 +450,37 @@ def add_subscription(
     subs.append(entry)
     _save(data)
     return entry
+
+
+def update_subscription_cover(
+    quarter: str,
+    title: str,
+    bangumi_id: int | None = None,
+    cover_url: str | None = None,
+) -> bool:
+    """把封面同步发现的元数据写回已有订阅记录。
+
+    只在字段当前为空时补写（不覆盖用户/订阅流程已有的值），
+    返回是否产生改动。匹配按 title 精确比对（封面同步的标题来自本地媒体库，
+    与 recovered_local 记录的 title 一致）。
+    """
+    data = _load()
+    subs = data.get("subscriptions", {}).get(quarter, [])
+    target = str(title or "").strip()
+    changed = False
+    for item in subs:
+        if str(item.get("title", "")).strip() != target:
+            continue
+        if bangumi_id and int(item.get("bangumi_id") or 0) <= 0:
+            item["bangumi_id"] = int(bangumi_id)
+            changed = True
+        if cover_url and not str(item.get("cover_url") or "").strip():
+            item["cover_url"] = cover_url
+            changed = True
+        break
+    if changed:
+        _save(data)
+    return changed
 
 
 def remove_subscription(quarter: str, title: str) -> bool:

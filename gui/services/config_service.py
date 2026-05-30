@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.utils.config import load_config, save_config
+from src.utils.config import DEFAULT_SUBTITLE_PRIORITIES, load_config, save_config
 
 
 class ConfigService:
@@ -17,7 +17,7 @@ class ConfigService:
                     "password": "",
                     "save_path": "",
                 },
-                "subtitle_priorities": ["ANi", "kirara"],
+                "subtitle_priorities": list(DEFAULT_SUBTITLE_PRIORITIES),
                 "resource_check": {"recent_weeks": 4},
                 "cleanup": {"keep_quarters": 2, "delete_files": True},
                 "advanced": {"use_mirror": False, "request_delay": 1.0},

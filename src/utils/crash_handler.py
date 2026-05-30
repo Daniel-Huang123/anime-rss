@@ -14,10 +14,10 @@ from PyQt6.QtCore import QObject, QtMsgType, pyqtSignal, qInstallMessageHandler
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QMessageBox
 
-from src.utils.runtime_paths import APP_ROOT
+from src.utils.runtime_paths import DATA_ROOT
 
 logger = logging.getLogger(__name__)
-CRASH_LOG_FILE = APP_ROOT / "crash.log"
+CRASH_LOG_FILE = DATA_ROOT / "crash.log"
 
 _INSTALLED = False
 _DIALOG_OPEN = False

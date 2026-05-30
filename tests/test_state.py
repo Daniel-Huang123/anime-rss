@@ -64,6 +64,41 @@ def test_add_subscription_update_existing(tmp_state):
     assert subs[0]["subgroup_name"] == "kirara"
 
 
+def test_update_subscription_cover_fills_empty_only(tmp_state):
+    from src.utils.state import (
+        add_subscription,
+        get_subscriptions,
+        update_subscription_cover,
+    )
+
+    # recovered_local 风格：缺 bangumi_id / cover_url
+    add_subscription("2026Q2", "番剧A", 0, 0, "local", "")
+
+    changed = update_subscription_cover(
+        "2026Q2", "番剧A", bangumi_id=777, cover_url="https://x/c.jpg"
+    )
+    assert changed is True
+
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["bangumi_id"] == 777
+    assert sub["cover_url"] == "https://x/c.jpg"
+
+    # 已有值时不覆盖，也不报改动
+    changed2 = update_subscription_cover(
+        "2026Q2", "番剧A", bangumi_id=888, cover_url="https://y/d.jpg"
+    )
+    assert changed2 is False
+    sub2 = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub2["bangumi_id"] == 777
+    assert sub2["cover_url"] == "https://x/c.jpg"
+
+
+def test_update_subscription_cover_missing_title_noop(tmp_state):
+    from src.utils.state import update_subscription_cover
+
+    assert update_subscription_cover("2026Q2", "不存在", bangumi_id=1) is False
+
+
 def test_get_quarters_to_cleanup(tmp_state, monkeypatch):
     from src.utils.state import add_subscription, get_quarters_to_cleanup
     import src.utils.season as season_module
@@ -187,6 +222,115 @@ def test_enrich_recovered_subscriptions_from_rules_by_title_fallback(tmp_state):
     sub = get_subscriptions("2026Q2")["2026Q2"][0]
     assert sub["rss_url"].endswith("bangumiId=222&subgroupid=1")
     assert sub["bangumi_id"] == 222
+
+
+def test_sync_local_subscriptions_detects_subgroup_from_filenames(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    root = tmp_path / "media"
+    (root / "2026Q2" / "番剧Z").mkdir(parents=True, exist_ok=True)
+    (root / "2026Q2" / "番剧Z" / "[ANi] 番剧Z - 01 [1080P].mkv").write_bytes(b"x")
+    (root / "2026Q2" / "番剧Z" / "[ANi] 番剧Z - 02 [1080P].mkv").write_bytes(b"x")
+
+    added = sync_local_subscriptions(root)
+    assert added == 1
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["title"] == "番剧Z"
+    assert sub["subgroup_name"] == "ANi"
+
+
+def test_sync_from_folders_detects_subgroup(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions_from_folders
+    from src.utils.file_parser import AnimeFolder, ParsedAnime
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    root = tmp_path / "media"
+    (root / "2026Q2" / "番剧X").mkdir(parents=True, exist_ok=True)
+    f1 = root / "2026Q2" / "番剧X" / "01.mkv"
+    f2 = root / "2026Q2" / "番剧X" / "02.mkv"
+    f1.write_bytes(b"x")
+    f2.write_bytes(b"x")
+    eps = [
+        ParsedAnime(file_path=f1, title="番剧X", episode="1", subgroup="ANi"),
+        ParsedAnime(file_path=f2, title="番剧X", episode="2", subgroup="ANi"),
+    ]
+    folder = AnimeFolder(title="番剧X", episodes=eps)
+
+    added = sync_local_subscriptions_from_folders(root, [folder])
+    assert added == 1
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["subgroup_name"] == "ANi"
+    assert sub["recovered_local"] is True
+
+
+def test_sync_from_folders_backfills_subgroup_on_existing_local(tmp_state, tmp_path, monkeypatch):
+    from src.utils.state import get_subscriptions, sync_local_subscriptions_from_folders
+    from src.utils.file_parser import AnimeFolder, ParsedAnime
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    # 预置一条旧的 recovered_local（subgroup_name="local"）
+    raw = json.loads(tmp_state.read_text(encoding="utf-8"))
+    raw["subscriptions"]["2026Q2"] = [{
+        "title": "番剧Y", "bangumi_id": 0, "subgroup_id": 0,
+        "subgroup_name": "local", "rss_url": "", "qbt_feed_path": "2026Q2/番剧Y",
+        "added_at": "2026-05-29", "cover_url": None, "bgm_id": None,
+        "recovered_local": True,
+    }]
+    tmp_state.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    root = tmp_path / "media"
+    (root / "2026Q2" / "番剧Y").mkdir(parents=True, exist_ok=True)
+    f1 = root / "2026Q2" / "番剧Y" / "01.mkv"
+    f1.write_bytes(b"x")
+    folder = AnimeFolder(
+        title="番剧Y",
+        episodes=[ParsedAnime(file_path=f1, title="番剧Y", episode="1", subgroup="kirara")],
+    )
+
+    added = sync_local_subscriptions_from_folders(root, [folder])
+    assert added == 0  # 已存在，不新增
+    sub = get_subscriptions("2026Q2")["2026Q2"][0]
+    assert sub["subgroup_name"] == "kirara"  # 已回填
+
+
+def test_sync_prunes_orphan_local_but_keeps_real(tmp_state, tmp_path, monkeypatch):
+    """文件已不存在的纯本地条目被清除；带 rss 的、或文件还在的保留。"""
+    from src.utils.state import get_subscriptions, sync_local_subscriptions
+    import src.utils.season as season_module
+
+    monkeypatch.setattr(season_module, "current_quarter", lambda: "2026Q2")
+
+    raw = json.loads(tmp_state.read_text(encoding="utf-8"))
+    raw["subscriptions"]["2026Q2"] = [
+        # 孤儿：纯本地、文件夹不存在 → 应删
+        {"title": "anime-rss", "bangumi_id": 0, "subgroup_id": 0, "subgroup_name": "local",
+         "rss_url": "", "qbt_feed_path": "2026Q2/anime-rss", "added_at": "2026-05-01",
+         "cover_url": None, "bgm_id": None, "recovered_local": True},
+        # 带 rss 的恢复条目：即使文件未下载也保留
+        {"title": "有RSS的番", "bangumi_id": 9, "subgroup_id": 1, "subgroup_name": "ANi",
+         "rss_url": "https://mikanani.me/RSS/Bangumi?bangumiId=9", "qbt_feed_path": "2026Q2/有RSS的番",
+         "added_at": "2026-05-01", "recovered_local": True},
+    ]
+    tmp_state.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    root = tmp_path / "media"
+    # 真实存在的本地番（应被发现并保留）
+    (root / "2026Q2" / "真实番").mkdir(parents=True, exist_ok=True)
+    (root / "2026Q2" / "真实番" / "01.mkv").write_bytes(b"x")
+
+    sync_local_subscriptions(root)
+
+    titles = {s["title"] for s in get_subscriptions("2026Q2")["2026Q2"]}
+    assert "anime-rss" not in titles          # 孤儿已清
+    assert "有RSS的番" in titles               # 带 rss 保留
+    assert "真实番" in titles                  # 现存本地保留
 
 
 def test_sync_local_subscriptions_skips_dev_dirs(tmp_state):

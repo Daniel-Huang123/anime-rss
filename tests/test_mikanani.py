@@ -119,7 +119,107 @@ def test_find_best_rss_no_resources():
     assert result is None
 
 
+def test_match_bangumi_id_via_season_index():
+    """bgm API 命中 → season_index 反查得到 bangumi_id。"""
+    from src.scrapers.mikanani import match_bangumi_id
+
+    season_index = {555: 1001}  # bgm_id → bangumi_id
+    with patch("src.scrapers.mikanani._bgm_canonical_names", return_value=([555], [])):
+        bid = match_bangumi_id("某番剧", season_index, "2026Q2")
+    assert bid == 1001
+
+
+def test_match_bangumi_id_title_fallback():
+    """bgm 不命中时退回季度标题反查（剥掉季号后缀）。"""
+    from src.scrapers.mikanani import match_bangumi_id
+
+    with patch("src.scrapers.mikanani._bgm_canonical_names", return_value=([], [])), \
+         patch("src.scrapers.mikanani.load_season_title_index", return_value={"某番剧": 2002}):
+        bid = match_bangumi_id("某番剧 第2季", {999: 1}, "2026Q2")
+    assert bid == 2002
+
+
+def test_match_bangumi_id_no_match_returns_none():
+    from src.scrapers.mikanani import match_bangumi_id
+
+    with patch("src.scrapers.mikanani._bgm_canonical_names", return_value=([42], [])), \
+         patch("src.scrapers.mikanani.load_season_title_index", return_value={}):
+        bid = match_bangumi_id("无关番", {555: 1001}, "2026Q2")
+    assert bid is None
+
+
 def test_build_rss_url():
     from src.scrapers.mikanani import build_rss_url
     url = build_rss_url(228, 562)
     assert url == "https://mikanani.me/RSS/Bangumi?bangumiId=228&subgroupid=562"
+
+
+def test_detect_rss_filter_supports_chs_or_jian_regex():
+    from src.scrapers.mikanani import detect_rss_filter
+
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[ANi] A [CHS]"},
+        {"title": "[ANi] A [简繁内嵌]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == "(CHS|简)"
+    assert rule["use_regex"] is True
+    assert rule["smart_filter"] is True
+
+
+def test_detect_rss_filter_falls_back_when_subtitle_filter_would_miss():
+    from src.scrapers.mikanani import detect_rss_filter
+
+    # 没有 CHS/简标记，不应强行设置 must_contain，回退到默认 smart_filter 去重
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[ANi] A [繁中]"},
+        {"title": "[ANi] A [外挂字幕]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == ""
+    assert rule["use_regex"] is False
+    assert rule["smart_filter"] is True
+
+
+def test_detect_rss_filter_jian_only_uses_regex_not_plain_string():
+    """仅「简日内嵌」式命名（无 CHS / 简体 / 简繁）也必须走正则。
+
+    若返回纯字符串 must_contain="简"，qBittorrent 会按 \\b简\\b 词边界匹配，
+    紧邻 CJK 时无法命中 → 漏下。正则 (CHS|简) 做子串匹配才正确。
+    """
+    from src.scrapers.mikanani import detect_rss_filter
+
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[喵萌奶茶屋] A - 01 [1080p][简日内嵌]"},
+        {"title": "[喵萌奶茶屋] A - 01 [1080p][繁日内嵌]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == "(CHS|简)"
+    assert rule["use_regex"] is True
+    assert rule["smart_filter"] is True
+
+
+def test_detect_rss_filter_chs_only_uses_regex():
+    """纯 CHS 命名（无「简」字）同样统一走正则，行为可预期。"""
+    from src.scrapers.mikanani import detect_rss_filter
+
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[Group] B - 01 [1080P][CHS&JPN]"},
+        {"title": "[Group] B - 01 [1080P][CHT&JPN]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == "(CHS|简)"
+    assert rule["use_regex"] is True
+    assert rule["smart_filter"] is True

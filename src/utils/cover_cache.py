@@ -86,11 +86,24 @@ def fetch_cover_from_mikanani(bangumi_id: int) -> Path | None:
         # 复用 mikanani 模块的全局 session，避免重复启动浏览器
         from src.scrapers.mikanani import _fetch
         page = _fetch(url)
+        if page is None:
+            return None
+
+        # scrapling 0.4.x 的 Selector 只有 .css()（返回列表），没有 .css_first()
+        def _first(selector: str):
+            try:
+                items = page.css(selector)
+            except Exception:
+                return None
+            return items[0] if items else None
 
         # 找封面 img：src 包含 /images/Bangumi/
-        img = page.css_first("img[src*='/images/Bangumi/']")
-        if img is None:
-            img = page.css_first(".bangumi-poster img, .cover img, img.cover")
+        img = (
+            _first("img[src*='/images/Bangumi/']")
+            or _first(".bangumi-poster img")
+            or _first(".cover img")
+            or _first("img.cover")
+        )
 
         if img is None:
             return None

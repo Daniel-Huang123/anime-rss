@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PyQt6.QtCore import QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,20 +15,31 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from gui.qt.workers import Worker
+from gui.services.subscription_service import realign_qbt_rules
 from src.qbt.client import QBTClient
 from src.utils.state import get_all_subscriptions_flat, remove_subscription
 
 
 class SubscriptionManagementPage(QWidget):
+    subscription_changed = pyqtSignal()
+
     def __init__(self, config: dict) -> None:
         super().__init__()
         self._cfg = config
         self._all_subs: list[dict] = []
+        self._thread_pool = QThreadPool.globalInstance()
+        self._active_workers: list[Worker] = []
         self._build_ui()
         self.refresh()
 
     def apply_config(self, config: dict) -> None:
         self._cfg = config
+        self.refresh()
+
+    def showEvent(self, event) -> None:
+        # 每次切到本页都重读 state，反映媒体库同步刚补上的字幕组/封面元数据
+        super().showEvent(event)
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -44,6 +56,10 @@ class SubscriptionManagementPage(QWidget):
         self.count_lbl = QLabel("0 条")
         self.count_lbl.setObjectName("status-text")
         title_row.addWidget(self.count_lbl)
+        self.realign_btn = QPushButton("🔧 对齐qB规则")
+        self.realign_btn.setToolTip("按当前订阅重检中文字幕/去重过滤，覆盖更新已存在的 qBittorrent 规则")
+        self.realign_btn.clicked.connect(self._realign_rules)
+        title_row.addWidget(self.realign_btn)
         self.refresh_btn = QPushButton("🔄 刷新")
         self.refresh_btn.clicked.connect(self.refresh)
         title_row.addWidget(self.refresh_btn)
@@ -108,6 +124,44 @@ class SubscriptionManagementPage(QWidget):
         self.q_combo.blockSignals(False)
         self._refresh_titles_combo()
 
+    def _realign_rules(self) -> None:
+        ret = QMessageBox.question(
+            self,
+            "对齐 qBittorrent 规则",
+            "将按当前订阅重新检测中文字幕/去重过滤规则，\n"
+            "并覆盖更新 qBittorrent 里已存在的下载规则（字幕组优先级沿用你的设置）。\n\n继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        self.realign_btn.setEnabled(False)
+        self.count_lbl.setText("正在对齐 qB 规则…")
+        worker = Worker(realign_qbt_rules, self._cfg)
+        self._active_workers.append(worker)
+        worker.signals.result.connect(self._on_realign_done)
+        worker.signals.error.connect(self._on_realign_error)
+        worker.signals.finished.connect(
+            lambda w=worker: self._active_workers.remove(w) if w in self._active_workers else None
+        )
+        self._thread_pool.start(worker)
+
+    def _on_realign_done(self, result: tuple) -> None:
+        ok, total, errors = result
+        self.realign_btn.setEnabled(True)
+        self.refresh()
+        msg = f"已对齐 {ok}/{total} 条 qBittorrent 规则。"
+        if errors:
+            msg += "\n\n失败：\n" + "\n".join(errors[:8])
+            QMessageBox.warning(self, "对齐完成（部分失败）", msg)
+        else:
+            QMessageBox.information(self, "对齐完成", msg)
+
+    def _on_realign_error(self, text: str) -> None:
+        self.realign_btn.setEnabled(True)
+        self.count_lbl.setText(f"共 {len(self._all_subs)} 条")
+        QMessageBox.critical(self, "对齐失败", f"对齐 qB 规则失败：\n{text}")
+
     def _refresh_titles_combo(self) -> None:
         q = self.q_combo.currentText()
         titles = [s["title"] for s in self._all_subs if s["quarter"] == q]
@@ -148,6 +202,7 @@ class SubscriptionManagementPage(QWidget):
 
         removed = remove_subscription(quarter, title)
         if removed:
+            self.subscription_changed.emit()
             QMessageBox.information(self, "完成", f"✅ 已删除 {quarter} / {title}")
             self.refresh()
         else:

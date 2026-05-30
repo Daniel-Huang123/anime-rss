@@ -6,6 +6,10 @@ import yaml
 
 from src.utils.runtime_paths import CONFIG_FILE
 
+# 字幕组默认优先级（名称包含关键词即匹配，不区分大小写）。
+# 作为缺省值：仅在 config.yaml 缺失/未设置时生效，不覆盖用户已有配置。
+DEFAULT_SUBTITLE_PRIORITIES = ["ANi", "kirara", "拨雪寻春", "LoliHouse", "桜都字幕组"]
+
 
 def load_config() -> dict:
     """读取 config.yaml，返回配置字典。"""

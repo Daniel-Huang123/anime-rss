@@ -22,7 +22,16 @@ from PyQt6.QtWidgets import (
 
 from gui.qt.workers import Worker
 from gui.services.config_service import ConfigService
-from gui.services.cover_service import batch_folder_cover_bytes, bytes_to_pixmap
+from gui.services.cover_service import (
+    batch_folder_cover_bytes,
+    bytes_to_pixmap,
+    invalidate_miss_cache,
+)
+from gui.services.cover_sync_service import (
+    plan_cover_sync,
+    sync_other_quarters_covers,
+    sync_titles_covers,
+)
 from gui.services.media_service import AnimeRow, build_media_rows
 from gui.themes import repolish
 from gui.views.widgets.cover_card import CoverCard
@@ -329,6 +338,8 @@ class MediaLibraryPage(QWidget):
         self._pending_refresh = False
         self._scan_seq = 0
         self._cover_seq = 0
+        self._sync_seq = 0
+        self._cover_synced_paths: set[str] = set()
         self._backfilled_paths: set[str] = set()
         self._current_media_path = ""
         self._build_ui()
@@ -619,7 +630,8 @@ class MediaLibraryPage(QWidget):
         self._cover_seq += 1
         cover_seq = self._cover_seq
         folders = [r.folder for r in rows]
-        worker = Worker(batch_folder_cover_bytes, folders, allow_network=True)
+        # 仅读本地缓存：已有封面秒出，不为联网抓取卡首屏；缺的交给后台并行同步。
+        worker = Worker(batch_folder_cover_bytes, folders, allow_network=False)
         self._active_workers.append(worker)
         worker.signals.result.connect(lambda cover_map, seq=cover_seq: self._on_covers_loaded(cover_map, seq))
         worker.signals.error.connect(lambda text, seq=cover_seq: self._on_cover_error(text, seq))
@@ -637,10 +649,79 @@ class MediaLibraryPage(QWidget):
     def _on_covers_loaded(self, cover_map: dict[str, bytes], seq: int) -> None:
         if seq != self._cover_seq:
             return
+        if cover_map:
+            self._cover_bytes_by_title.update(cover_map)
+            self._update_visible_covers()
+        # 第一次读完媒体库后：对仍缺封面的作品做封面同步（先当季，再其他季度）
+        missing = [r.title for r in self._rows if r.title not in self._cover_bytes_by_title]
+        if missing:
+            self._start_cover_sync(missing)
+
+    # ── 封面同步（缺封面作品：当季 → 其他季度）──────────────────
+
+    def _start_cover_sync(self, missing_titles: list[str]) -> None:
+        # 每个媒体路径每个会话只同步一次；命中结果已写回 state + 封面缓存，
+        # 后续刷新/重启走普通封面解析直接命中缓存。
+        path = self._current_media_path
+        if not missing_titles or path in self._cover_synced_paths:
+            return
+        self._cover_synced_paths.add(path)
+        self._sync_seq += 1
+        sync_seq = self._sync_seq
+
+        _cur_q, cur_titles, others = plan_cover_sync(missing_titles)
+        if cur_titles:
+            worker = Worker(sync_titles_covers, self._cfg, cur_titles, _cur_q)
+            self._active_workers.append(worker)
+            worker.signals.result.connect(
+                lambda cover_map, seq=sync_seq: self._on_sync_covers(cover_map, seq)
+            )
+            worker.signals.error.connect(lambda _text: None)
+            worker.signals.finished.connect(
+                lambda w=worker, o=others, seq=sync_seq: self._after_current_sync(w, o, seq)
+            )
+            self._thread_pool.start(worker)
+        elif others:
+            self._start_other_quarter_sync(others, sync_seq)
+
+    def _after_current_sync(self, worker: Worker, others: dict, seq: int) -> None:
+        if worker in self._active_workers:
+            self._active_workers.remove(worker)
+        if seq != self._sync_seq:
+            return
+        if others:
+            self._start_other_quarter_sync(others, seq)
+
+    def _start_other_quarter_sync(self, others: dict, seq: int) -> None:
+        worker = Worker(sync_other_quarters_covers, self._cfg, others)
+        self._active_workers.append(worker)
+        worker.signals.result.connect(
+            lambda cover_map, s=seq: self._on_sync_covers(cover_map, s)
+        )
+        worker.signals.error.connect(lambda _text: None)
+        worker.signals.finished.connect(
+            lambda w=worker: self._active_workers.remove(w) if w in self._active_workers else None
+        )
+        self._thread_pool.start(worker)
+
+    def _on_sync_covers(self, cover_map: dict[str, bytes], seq: int) -> None:
+        if seq != self._sync_seq:
+            return
         if not cover_map:
             return
         self._cover_bytes_by_title.update(cover_map)
         self._update_visible_covers()
+
+    def resync_covers(self) -> None:
+        """外部订阅变化后重新解析封面（不重扫媒体目录）。
+
+        允许对当前路径再触发一次同步：新订阅的封面通常已缓存，普通批量加载即可命中；
+        若仍缺，则放行一次同步补齐。
+        """
+        invalidate_miss_cache()
+        self._cover_synced_paths.discard(self._current_media_path)
+        if self._rows:
+            self._start_cover_loading(self._rows)
 
     def _render_rows(self) -> None:
         self._clear_cards()

@@ -83,6 +83,76 @@ def test_update_check_ignores_release_without_desktop_marker(monkeypatch):
     assert result["reason"] == "anime-season-rss has no desktop GUI release"
 
 
+def test_find_update_asset_picks_windows_zip_and_sha():
+    release = {
+        "assets": [
+            {"name": "anime-rss-v0.2.0-windows-x64.zip", "browser_download_url": "https://x/z.zip", "size": 1234},
+            {"name": "anime-rss-v0.2.0-windows-x64.zip.sha256", "browser_download_url": "https://x/z.sha256", "size": 64},
+            {"name": "notes.txt", "browser_download_url": "https://x/n.txt", "size": 10},
+        ]
+    }
+    a = update_service.find_update_asset(release)
+    assert a["url"] == "https://x/z.zip"
+    assert a["size"] == 1234
+    assert a["sha256_url"] == "https://x/z.sha256"
+
+
+def test_find_update_asset_empty_without_zip():
+    assert update_service.find_update_asset({"assets": [{"name": "src.tar.gz", "browser_download_url": "u"}]}) == {}
+
+
+def test_sha256_of(tmp_path):
+    import hashlib
+
+    p = tmp_path / "f.bin"
+    p.write_bytes(b"hello world")
+    assert update_service.sha256_of(p) == hashlib.sha256(b"hello world").hexdigest()
+
+
+def test_fetch_expected_sha256_parses_first_token(monkeypatch):
+    digest = "a" * 64
+
+    class _R:
+        text = f"{digest}  anime-rss-v0.2.0-windows-x64.zip\n"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(update_service.requests, "get", lambda *a, **k: _R())
+    assert update_service.fetch_expected_sha256("https://x/z.sha256") == digest
+
+
+def test_fetch_expected_sha256_rejects_non_hex(monkeypatch):
+    class _R:
+        text = "not-a-valid-digest filename"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(update_service.requests, "get", lambda *a, **k: _R())
+    assert update_service.fetch_expected_sha256("https://x/z.sha256") == ""
+
+
+def test_build_updater_ps1_has_wait_copy_restart(tmp_path):
+    s = update_service._build_updater_ps1(
+        4321, tmp_path / "new", tmp_path / "install", tmp_path / "work", "zhuifanji.exe"
+    )
+    assert "4321" in s
+    assert "robocopy" in s and "/E" in s
+    assert "zhuifanji.exe" in s
+    assert "Get-Process" in s
+    assert "zhuifanji_update.log" in s
+    assert "-PassThru" in s
+
+
+def test_find_build_root_and_exe_name(tmp_path):
+    root = tmp_path / "new"
+    (root / "_internal").mkdir(parents=True)
+    (root / "zhuifanji.exe").write_bytes(b"x")
+    assert update_service._find_build_root(tmp_path / "new") == root
+    assert update_service._exe_name_in(root) == "zhuifanji.exe"
+
+
 def test_current_version_reads_pyinstaller_bundle_pyproject(tmp_path, monkeypatch):
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()

@@ -19,6 +19,15 @@ _MEMO: dict[str, bytes] = {}
 _MISS_KEYS: set[str] = set()
 
 
+def invalidate_miss_cache() -> None:
+    """清除「未命中」记忆，使封面元数据更新后能重新尝试解析。
+
+    封面同步给本地番剧补上 bangumi_id / cover_url 后，需要让媒体库重新走
+    folder_cover_bytes 解析，否则会被 _MISS_KEYS 短路掉。
+    """
+    _MISS_KEYS.clear()
+
+
 def _norm_title(title: str) -> str:
     return str(title or "").strip().lower()
 
@@ -97,11 +106,13 @@ def _cover_lookup_key(title: str, bangumi_id: int | None, url: str | None) -> st
     return f"{_norm_title(title)}|{int(bangumi_id or 0)}|{str(url or '').strip()}"
 
 
-def fetch_cover_bytes(url: str | None) -> bytes | None:
+def fetch_cover_bytes(url: str | None, *, allow_network: bool = True) -> bytes | None:
     data = _fetch_cover_bytes_cached(url)
     if data:
         return data
     if not url:
+        return None
+    if not allow_network:
         return None
 
     COVER_CACHE_DIR.mkdir(exist_ok=True)
@@ -131,7 +142,7 @@ def folder_cover_bytes(
     subs = subs if subs is not None else get_all_subscriptions_flat()
     sub = _pick_subscription(folder.title, subs)
     url = (sub or {}).get("cover_url") or folder.cover_url
-    data = fetch_cover_bytes(url) if allow_network else _fetch_cover_bytes_cached(url)
+    data = fetch_cover_bytes(url, allow_network=allow_network)
     if data:
         return data
 
@@ -174,10 +185,26 @@ def batch_folder_cover_bytes(
 ) -> dict[str, bytes]:
     subs = get_all_subscriptions_flat()
     result: dict[str, bytes] = {}
-    for folder in folders:
-        data = folder_cover_bytes(folder, subs=subs, allow_network=allow_network)
-        if data:
-            result[folder.title] = data
+    if not folders:
+        return result
+
+    # 仅缓存模式逐个处理即可（无网络等待）；联网模式并行抓取，避免串行卡几十秒。
+    if not allow_network:
+        for folder in folders:
+            data = folder_cover_bytes(folder, subs=subs, allow_network=False)
+            if data:
+                result[folder.title] = data
+        return result
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(folder: AnimeFolder) -> tuple[str, bytes | None]:
+        return folder.title, folder_cover_bytes(folder, subs=subs, allow_network=True)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for title, data in pool.map(_one, folders):
+            if data:
+                result[title] = data
     return result
 
 
