@@ -24,6 +24,19 @@ from src.utils.state import (
 
 _PENDING_FILE = PENDING_CHECKS_FILE
 
+# Windows 目录/文件名非法字符 → 全角等价，避免「Re:从零」这类带 : * ? 的番名
+# 生成无法创建的保存目录 / qB 分类，导致规则匹配了也下不下来。
+_ILLEGAL_PATH_CHARS = {
+    "<": "＜", ">": "＞", ":": "：", '"': "＂",
+    "/": "／", "\\": "＼", "|": "｜", "?": "？", "*": "＊",
+}
+
+
+def _safe_component(name: str) -> str:
+    """把番剧名清成可作 Windows 目录名 / qB 分类名的安全串（保留可读性，用全角替换）。"""
+    s = "".join(_ILLEGAL_PATH_CHARS.get(ch, ch) for ch in str(name))
+    return s.rstrip(" .") or "_"
+
 
 def _load_pending() -> dict[str, list[str]]:
     if _PENDING_FILE.exists():
@@ -173,10 +186,12 @@ def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, 
         password=qbt_cfg["password"],
     )
     rss_filter = detect_rss_filter(result["rss_url"])
-    dl_path = f"{qbt_save_path}/{quarter}/{title}" if qbt_save_path else ""
+    safe = _safe_component(title)
+    feed_path = f"{quarter}/{safe}"
+    dl_path = f"{qbt_save_path}/{quarter}/{safe}" if qbt_save_path else ""
     ok, msg = qbt.add_rss_feed(
         url=result["rss_url"],
-        path=f"{quarter}/{title}",
+        path=feed_path,
         save_path=dl_path,
         must_contain=rss_filter.get("must_contain", ""),
         must_not_contain=rss_filter.get("must_not_contain", ""),
@@ -186,15 +201,15 @@ def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, 
     if not ok:
         return False, msg
 
-    # RSS 规则有时会受 qB “已读文章”状态影响而不立即触发，这里主动补拉最新匹配条目兜底。
+    # qB 自动下载规则对「订阅前已存在的存量集」不回溯触发，这里主动补齐全部匹配的存量集；
+    # 新到的集仍由规则自动下载（add_rss_feed 已确保规则先于 feed 建立）。
     qbt.backfill_from_rss(
         rss_url=result["rss_url"],
-        category=f"{quarter}/{title}",
+        category=feed_path,
         save_path=dl_path,
         must_contain=rss_filter.get("must_contain", ""),
         must_not_contain=rss_filter.get("must_not_contain", ""),
         use_regex=bool(rss_filter.get("use_regex", False)),
-        max_items=1,
     )
 
     get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
@@ -236,8 +251,9 @@ def unsubscribe_title(cfg: dict, quarter: str, title: str, delete_qbt: bool = Tr
             username=qbt_cfg["username"],
             password=qbt_cfg["password"],
         )
-        feed_path = f"{quarter}/{title}"
-        save_path = f"{qbt_save_path}/{quarter}/{title}" if qbt_save_path else ""
+        safe = _safe_component(title)
+        feed_path = f"{quarter}/{safe}"
+        save_path = f"{qbt_save_path}/{quarter}/{safe}" if qbt_save_path else ""
         qbt.unsubscribe(feed_path=feed_path, save_path=save_path)
 
     removed = remove_subscription(quarter, title)
@@ -277,8 +293,9 @@ def realign_qbt_rules(cfg: dict) -> tuple[int, int, list[str]]:
         quarter = str(sub.get("quarter", "")).strip()
         title = str(sub.get("title", "")).strip()
         rss_url = str(sub.get("rss_url", "")).strip()
-        feed_path = str(sub.get("qbt_feed_path") or f"{quarter}/{title}").strip()
-        dl_path = f"{qbt_save_path}/{quarter}/{title}" if qbt_save_path else ""
+        safe = _safe_component(title)
+        feed_path = f"{quarter}/{safe}"
+        dl_path = f"{qbt_save_path}/{quarter}/{safe}" if qbt_save_path else ""
         try:
             rule_filter = detect_rss_filter(rss_url)
             success, msg = qbt.add_rss_feed(

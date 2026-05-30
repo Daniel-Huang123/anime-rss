@@ -18,7 +18,10 @@ import traceback
 from datetime import datetime
 
 # 关键项：这些必须全过才算「功能上无缺陷」。qBittorrent 连接属环境项（断网/未开不算缺陷）。
-_CRITICAL = {"imports", "filter_simplified", "filter_fallback_dedup"}
+_CRITICAL = {
+    "imports", "filter_simplified", "filter_fallback_dedup",
+    "backfill_torrent_url", "backfill_episode_dedup",
+}
 
 
 def is_selftest(argv: list[str]) -> bool:
@@ -98,6 +101,25 @@ def run_selftest(argv: list[str]) -> int:
         )
     except Exception as e:
         record("filter_logic", False, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+
+    # 2b) 补拉链路关键修复（离线、确定性）：种子链接取 enclosure 而非详情页 + 同集去重
+    try:
+        from src.qbt.client import _episode_key, _torrent_url_from_entry
+
+        entry = {
+            "title": "[ANi] X - 12 [1080P][Baha][CHT][MP4]",
+            "link": "https://mikanani.me/Home/Episode/abc",  # 详情页，非种子
+            "enclosures": [{"href": "https://mikanani.me/Download/x/abc.torrent",
+                            "type": "application/x-bittorrent"}],
+        }
+        url = _torrent_url_from_entry(entry)
+        record("backfill_torrent_url", url.endswith(".torrent") and "/Episode/" not in url,
+               f"url={url}")
+
+        same = _episode_key("X [08][1080P][简繁内封]") == _episode_key("X [08][1080P][简体内嵌]")
+        record("backfill_episode_dedup", same, "同集简繁/简体两版 key 相同→去重")
+    except Exception as e:
+        record("backfill_fix", False, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
     # 3) 下载链路：连 qBittorrent → 列 RSS 规则 → 校验对齐（环境项）
     try:
