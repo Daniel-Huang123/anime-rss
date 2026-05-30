@@ -96,6 +96,8 @@ class MainWindow(QMainWindow):
 
         self.settings_page.config_saved.connect(self._on_config_saved)
         self.season_sub_page.subscription_changed.connect(self.media_page.resync_covers)
+        self.sub_manage_page.subscription_changed.connect(self.media_page.resync_covers)
+        self.sub_manage_page.subscription_changed.connect(self.season_sub_page.refresh_subscription_state)
 
         for page in (self.dashboard_page, self.season_sub_page, self.sub_manage_page,
                      self.cleanup_page, self.media_page, self.settings_page):

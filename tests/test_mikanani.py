@@ -152,3 +152,74 @@ def test_build_rss_url():
     from src.scrapers.mikanani import build_rss_url
     url = build_rss_url(228, 562)
     assert url == "https://mikanani.me/RSS/Bangumi?bangumiId=228&subgroupid=562"
+
+
+def test_detect_rss_filter_supports_chs_or_jian_regex():
+    from src.scrapers.mikanani import detect_rss_filter
+
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[ANi] A [CHS]"},
+        {"title": "[ANi] A [简繁内嵌]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == "(CHS|简)"
+    assert rule["use_regex"] is True
+    assert rule["smart_filter"] is True
+
+
+def test_detect_rss_filter_falls_back_when_subtitle_filter_would_miss():
+    from src.scrapers.mikanani import detect_rss_filter
+
+    # 没有 CHS/简标记，不应强行设置 must_contain，回退到默认 smart_filter 去重
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[ANi] A [繁中]"},
+        {"title": "[ANi] A [外挂字幕]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == ""
+    assert rule["use_regex"] is False
+    assert rule["smart_filter"] is True
+
+
+def test_detect_rss_filter_jian_only_uses_regex_not_plain_string():
+    """仅「简日内嵌」式命名（无 CHS / 简体 / 简繁）也必须走正则。
+
+    若返回纯字符串 must_contain="简"，qBittorrent 会按 \\b简\\b 词边界匹配，
+    紧邻 CJK 时无法命中 → 漏下。正则 (CHS|简) 做子串匹配才正确。
+    """
+    from src.scrapers.mikanani import detect_rss_filter
+
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[喵萌奶茶屋] A - 01 [1080p][简日内嵌]"},
+        {"title": "[喵萌奶茶屋] A - 01 [1080p][繁日内嵌]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == "(CHS|简)"
+    assert rule["use_regex"] is True
+    assert rule["smart_filter"] is True
+
+
+def test_detect_rss_filter_chs_only_uses_regex():
+    """纯 CHS 命名（无「简」字）同样统一走正则，行为可预期。"""
+    from src.scrapers.mikanani import detect_rss_filter
+
+    feed = MagicMock()
+    feed.entries = [
+        {"title": "[Group] B - 01 [1080P][CHS&JPN]"},
+        {"title": "[Group] B - 01 [1080P][CHT&JPN]"},
+    ]
+    with patch("src.scrapers.mikanani.feedparser.parse", return_value=feed):
+        rule = detect_rss_filter("https://example.test/rss")
+
+    assert rule["must_contain"] == "(CHS|简)"
+    assert rule["use_regex"] is True
+    assert rule["smart_filter"] is True

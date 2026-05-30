@@ -41,10 +41,19 @@ def _copy_file_if_missing(src: Path, dst: Path) -> None:
 
 
 def _copy_tree_if_missing(src: Path, dst: Path) -> None:
-    if not src.is_dir() or dst.exists():
+    if not src.is_dir():
         return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    for from_path in src.rglob("*"):
+        rel = from_path.relative_to(src)
+        to_path = dst / rel
+        if from_path.is_dir():
+            to_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if to_path.exists():
+            continue
+        to_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(from_path, to_path)
 
 
 def _migrate_legacy_data(legacy_root: Path, data_root: Path) -> None:

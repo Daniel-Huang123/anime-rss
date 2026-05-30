@@ -1,29 +1,17 @@
-# anime-rss 开发规范
-
-## 1. 运行与测试
-
-- 所有 Python 相关命令统一使用 `uv`。
-- 推荐命令：
-  - `uv run python -m pytest tests/ -q`
+﻿# anime-rss 寮€鍙戣鑼?
+## 1. 杩愯涓庢祴璇?
+- 鎵€鏈?Python 鐩稿叧鍛戒护缁熶竴浣跨敤 `uv`銆?- 鎺ㄨ崘鍛戒护锛?  - `uv run python -m pytest tests/ -q`
   - `uv run ruff check <files>`
 
-## 2. 压缩包处理
+## 2. 鍘嬬缉鍖呭鐞?
+- 鎵€鏈夊帇缂╁寘锛坄.zip` / `.tar.gz` / `.rar` 绛夛級缁熶竴浣跨敤 **Bandzip** 瑙ｅ帇銆?- 涓嶄娇鐢ㄥ懡浠よ瑙ｅ帇宸ュ叿锛坄unzip` / `tar` / `7z`锛夈€?
+## 3. 鎵撳寘
 
-- 所有压缩包（`.zip` / `.tar.gz` / `.rar` 等）统一使用 **Bandzip** 解压。
-- 不使用命令行解压工具（`unzip` / `tar` / `7z`）。
+- PyInstaller 鎵撳寘鍛戒护锛?  - `uv run --group gui --group dev pyinstaller --noconfirm --clean zhuifanji.spec`
+- 浜х墿鐩綍锛歚dist/zhuifanji`
 
-## 3. 打包
-
-- PyInstaller 打包命令：
-  - `uv run pyinstaller --noconfirm --clean zhuifanji.spec`
-- 产物目录：`dist/zhuifanji`
-
-## 4. 运行时数据目录
-
-- dev 模式：运行时数据仍在项目根目录。
-- frozen/exe 模式：运行时数据在 `%APPDATA%\\zhuifanji`。
-- 启动时会从旧 exe 目录迁移缺失数据到 `%APPDATA%\\zhuifanji`，不会覆盖已存在数据。
-- 运行时数据包括：
+## 4. 杩愯鏃舵暟鎹洰褰?
+- dev 妯″紡锛氳繍琛屾椂鏁版嵁浠嶅湪椤圭洰鏍圭洰褰曘€?- frozen/exe 妯″紡锛氳繍琛屾椂鏁版嵁鍦?`%APPDATA%\\zhuifanji`銆?- 鍚姩鏃朵細浠庢棫 exe 鐩綍杩佺Щ缂哄け鏁版嵁鍒?`%APPDATA%\\zhuifanji`锛屼笉浼氳鐩栧凡瀛樺湪鏁版嵁銆?- 杩愯鏃舵暟鎹寘鎷細
   - `config.yaml`
   - `state.json`
   - `watch_history.json`
@@ -34,24 +22,15 @@
   - `.cover_cache/`
   - `assets/covers/`
 
-## 5. GUI 线程约定
+## 5. GUI 绾跨▼绾﹀畾
 
-- 后台任务使用 `gui/qt/workers.py::Worker`（`QThreadPool`）。
-- 结果通过 signal 回主线程处理。
-- 不在 worker 线程直接操作 Qt 控件。
+- 鍚庡彴浠诲姟浣跨敤 `gui/qt/workers.py::Worker`锛坄QThreadPool`锛夈€?- 缁撴灉閫氳繃 signal 鍥炰富绾跨▼澶勭悊銆?- 涓嶅湪 worker 绾跨▼鐩存帴鎿嶄綔 Qt 鎺т欢銆?
+## 6. 缂撳瓨涓庣姸鎬佸啓鍏?
+- 灏侀潰/鐣崟浼樺厛璧扮紦瀛橈紝缃戠粶璇锋眰鍦ㄥ悗鍙拌ˉ榻愩€?- `state.json` 鐨勫啓鍏ヤ繚鎸佷覆琛岋紝閬垮厤骞跺彂鍐欏鑷存崯鍧忋€?
+## 7. scrapling 鍏煎
 
-## 6. 缓存与状态写入
+- 褰撳墠浣跨敤 `scrapling 0.4.x`銆?- `Selector` 浠呬娇鐢?`.css()`锛堣繑鍥炲垪琛級锛屼笉瑕佷娇鐢?`.css_first()`銆?
+## 8. 鍙戝竷绾﹀畾锛堣嚜鏇存柊渚濊禆锛?
+- 姣忎釜妗岄潰鐗?release 蹇呴』涓婁紶锛?  - `anime-rss-vX.Y.Z-windows-x64.zip`
+  - 鍚屽悕 `.sha256` 鏂囦欢
 
-- 封面/番单优先走缓存，网络请求在后台补齐。
-- `state.json` 的写入保持串行，避免并发写导致损坏。
-
-## 7. scrapling 兼容
-
-- 当前使用 `scrapling 0.4.x`。
-- `Selector` 仅使用 `.css()`（返回列表），不要使用 `.css_first()`。
-
-## 8. 发布约定（自更新依赖）
-
-- 每个桌面版 release 必须上传：
-  - `anime-rss-vX.Y.Z-windows-x64.zip`
-  - 同名 `.sha256` 文件

@@ -106,11 +106,13 @@ def _cover_lookup_key(title: str, bangumi_id: int | None, url: str | None) -> st
     return f"{_norm_title(title)}|{int(bangumi_id or 0)}|{str(url or '').strip()}"
 
 
-def fetch_cover_bytes(url: str | None) -> bytes | None:
+def fetch_cover_bytes(url: str | None, *, allow_network: bool = True) -> bytes | None:
     data = _fetch_cover_bytes_cached(url)
     if data:
         return data
     if not url:
+        return None
+    if not allow_network:
         return None
 
     COVER_CACHE_DIR.mkdir(exist_ok=True)
@@ -140,7 +142,7 @@ def folder_cover_bytes(
     subs = subs if subs is not None else get_all_subscriptions_flat()
     sub = _pick_subscription(folder.title, subs)
     url = (sub or {}).get("cover_url") or folder.cover_url
-    data = fetch_cover_bytes(url) if allow_network else _fetch_cover_bytes_cached(url)
+    data = fetch_cover_bytes(url, allow_network=allow_network)
     if data:
         return data
 

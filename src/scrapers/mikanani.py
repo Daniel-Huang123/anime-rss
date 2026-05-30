@@ -1046,6 +1046,7 @@ _CHS_PATTERN = _re2.compile(
     r'|\[简\]',
     _re2.IGNORECASE,
 )
+_JIAN_PATTERN = _re2.compile(r"简")
 
 # 来源标签：原始词 → 标准化的 must_contain 字符串
 _SOURCE_NORM = {
@@ -1071,11 +1072,13 @@ def detect_rss_filter(rss_url: str) -> dict:
     """
     扫描 RSS 前 10 条条目，检测最优的去重过滤规则。
 
-    策略：
-      1. 有简体内嵌（CHS / CHS&CHT）→ must_contain="CHS"，只下简体版本
-      2. 多来源（CR + Abema 等）→ 按优先级锁定一个来源的 must_contain，
-         避免同集多版本被同时下载（smart_filter 无法跨不同命名格式去重）
-      3. 单来源 → must_contain="" smart_filter=True
+    策略（按优先级）：
+      1. 检测到简体标记（CHS / 简繁内封 / 简体内嵌 / 简日 / [简] 等）
+         → must_contain="(CHS|简)" use_regex=True，只下简体、放过纯繁体，
+           同集多个简体变体由 smart_filter 去重。
+      2. 多来源（CR + Abema 等）且无简体标记 → 按优先级锁定一个来源的
+         must_contain，避免同集多源被同时下载（smart_filter 无法跨命名格式去重）。
+      3. 都没命中 → must_contain="" smart_filter=True，回退到纯集数去重兜底。
 
     返回 dict 供 QBTClient.add_rss_feed 直接使用。
     """
@@ -1086,12 +1089,62 @@ def detect_rss_filter(rss_url: str) -> dict:
         titles = []
 
     if not titles:
-        return {"must_contain": "", "must_not_contain": "", "smart_filter": True}
+        return {
+            "must_contain": "",
+            "must_not_contain": "",
+            "use_regex": False,
+            "smart_filter": True,
+        }
 
-    has_chs = any(_CHS_PATTERN.search(t) for t in titles)
-    if has_chs:
-        logger.info("RSS 检测到简体内嵌，设置 must_contain=CHS")
-        return {"must_contain": "CHS", "must_not_contain": "", "smart_filter": True}
+    def _filter_hits(
+        items: list[str],
+        must_contain: str,
+        must_not_contain: str = "",
+        use_regex: bool = False,
+    ) -> int:
+        if not must_contain and not must_not_contain:
+            return len(items)
+        n = 0
+        if use_regex:
+            try:
+                must_re = _re2.compile(must_contain, _re2.IGNORECASE) if must_contain else None
+                not_re = _re2.compile(must_not_contain, _re2.IGNORECASE) if must_not_contain else None
+            except Exception:
+                return 0
+            for t in items:
+                if must_re and not must_re.search(t):
+                    continue
+                if not_re and not_re.search(t):
+                    continue
+                n += 1
+            return n
+
+        for t in items:
+            if must_contain and must_contain not in t:
+                continue
+            if must_not_contain and must_not_contain in t:
+                continue
+            n += 1
+        return n
+
+    # 简体中文标记：CHS / 简繁内封 / 简体内嵌 / [简] / 简日 / GB 等。
+    # 统一用正则 (CHS|简) 锁定简体版本，命中即只下简体、放过纯繁体（繁体内嵌不含「简」）。
+    #
+    # 必须用 use_regex=True：qBittorrent 对非正则 must_contain 会按 \b<词>\b 词边界匹配，
+    # 而「简」紧邻别的 CJK 字符（如「简日内嵌」「简体内嵌」）时 \b简\b 不成立 → 漏配。
+    # 正则模式做子串匹配（无词边界），才能正确命中这些内嵌命名。
+    has_simplified = any(_CHS_PATTERN.search(t) or _JIAN_PATTERN.search(t) for t in titles)
+    if has_simplified:
+        rule = {
+            "must_contain": "(CHS|简)",
+            "must_not_contain": "",
+            "use_regex": True,
+            "smart_filter": True,
+        }
+        # 兜底校验：正则确实能命中样本才采用，否则落到下面的来源/去重兜底
+        if _filter_hits(titles, rule["must_contain"], use_regex=True) > 0:
+            logger.info("RSS 检测到简体中文标记，设置 must_contain=(CHS|简) (regex) smart_filter=True")
+            return rule
 
     # 收集所有出现的来源：key=归一化名（用于优先级比较），value=RSS 原始大小写（用于 must_contain）
     sources: dict[str, str] = {}   # norm_key → original_str
@@ -1109,6 +1162,16 @@ def detect_rss_filter(rss_url: str) -> dict:
             if preferred in sources:
                 contain_str = sources[preferred]
                 logger.info("RSS 多来源 %s，锁定 must_contain=%s", set(sources), contain_str)
-                return {"must_contain": contain_str, "must_not_contain": "", "smart_filter": False}
+                return {
+                    "must_contain": contain_str,
+                    "must_not_contain": "",
+                    "use_regex": False,
+                    "smart_filter": False,
+                }
 
-    return {"must_contain": "", "must_not_contain": "", "smart_filter": True}
+    return {
+        "must_contain": "",
+        "must_not_contain": "",
+        "use_regex": False,
+        "smart_filter": True,
+    }

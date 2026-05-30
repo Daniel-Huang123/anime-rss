@@ -35,6 +35,8 @@ def test_frozen_mode_migrates_legacy_data_without_overwrite(monkeypatch, tmp_pat
     roaming_root = appdata / "zhuifanji"
     roaming_root.mkdir(parents=True)
     (roaming_root / "config.yaml").write_text("new-config", encoding="utf-8")
+    (roaming_root / ".cover_cache").mkdir()
+    (roaming_root / ".cover_cache" / "keep.jpg").write_bytes(b"keep")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(legacy_root / "zhuifanji.exe"), raising=False)
@@ -49,3 +51,4 @@ def test_frozen_mode_migrates_legacy_data_without_overwrite(monkeypatch, tmp_pat
     # Missing files and dirs should be migrated from legacy root.
     assert (roaming_root / "state.json").read_text(encoding="utf-8") == '{"legacy": true}'
     assert (roaming_root / ".cover_cache" / "old.jpg").read_bytes() == b"old"
+    assert (roaming_root / ".cover_cache" / "keep.jpg").read_bytes() == b"keep"

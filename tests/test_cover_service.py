@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_folder_cover_prefers_richer_subscription(monkeypatch):
     import gui.services.cover_service as cover_service
@@ -15,7 +13,7 @@ def test_folder_cover_prefers_richer_subscription(monkeypatch):
     monkeypatch.setattr(
         cover_service,
         "fetch_cover_bytes",
-        lambda url: b"cover-bytes" if url == "https://example.com/cover.jpg" else None,
+        lambda url, **_kw: b"cover-bytes" if url == "https://example.com/cover.jpg" else None,
     )
 
     folder = AnimeFolder(title="测试番剧")
@@ -37,7 +35,7 @@ def test_folder_cover_can_recover_bangumi_id_from_rss_url(monkeypatch, tmp_path)
         }
     ]
     monkeypatch.setattr(cover_service, "get_all_subscriptions_flat", lambda: subs)
-    monkeypatch.setattr(cover_service, "fetch_cover_bytes", lambda _url: None)
+    monkeypatch.setattr(cover_service, "fetch_cover_bytes", lambda _url, **_kw: None)
     monkeypatch.setattr(cover_service, "get_cover_path", lambda _title, _bid: None)
 
     out = tmp_path / "id_456.jpg"
@@ -67,7 +65,7 @@ def test_batch_folder_cover_bytes_reads_subscriptions_once(monkeypatch):
 
     monkeypatch.setattr(cover_service, "get_all_subscriptions_flat", lambda: calls.__setitem__("subs", calls["subs"] + 1) or subs)
 
-    def _fake_fetch(url):
+    def _fake_fetch(url, **_kw):
         calls["fetch"] += 1
         return b"img-a" if url and url.endswith("/a.jpg") else None
 

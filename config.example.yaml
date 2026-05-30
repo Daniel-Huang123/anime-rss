@@ -12,6 +12,9 @@ qbittorrent:
 subtitle_priorities:
   - ANi
   - kirara
+  - 拨雪寻春
+  - LoliHouse
+  - 桜都字幕组
 
 resource_check:
   recent_weeks: 4              # 判断"有资源"的时间窗口（周数）

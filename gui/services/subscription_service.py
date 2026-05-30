@@ -11,6 +11,7 @@ from src.scrapers.mikanani import (
     resolve_anime_rss,
 )
 from src.scrapers.yuc_wiki import get_season_list
+from src.utils.config import DEFAULT_SUBTITLE_PRIORITIES
 from src.utils.cover_cache import get_or_fetch_cover
 from src.utils.runtime_paths import PENDING_CHECKS_FILE
 from src.utils.season import quarter_to_ym
@@ -146,7 +147,7 @@ def apply_bgm_map(dataset: SeasonDataset, yuc_bgm_map: dict[str, int]) -> None:
 
 
 def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, season_index: dict[int, int], search_override: str | None = None) -> tuple[bool, str]:
-    priorities = cfg.get("subtitle_priorities", ["ANi", "kirara"])
+    priorities = cfg.get("subtitle_priorities") or list(DEFAULT_SUBTITLE_PRIORITIES)
     weeks = cfg.get("resource_check", {}).get("recent_weeks", 4)
     use_mirror = cfg.get("advanced", {}).get("use_mirror", False)
     qbt_cfg = cfg["qbittorrent"]

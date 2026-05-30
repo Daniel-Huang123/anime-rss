@@ -159,8 +159,13 @@ def sync_titles_covers(cfg: dict, titles: list[str], quarter: str) -> dict[str, 
     season_index = load_season_index_cached(quarter, use_mirror)
 
     if season_index:
+        _fallback_match = _search_matcher(use_mirror)
+
         def _match(title: str) -> int | None:
-            return match_bangumi_id(title, season_index, quarter, use_mirror)
+            bid = match_bangumi_id(title, season_index, quarter, use_mirror)
+            if bid:
+                return bid
+            return _fallback_match(title)
     else:
         _match = _search_matcher(use_mirror)
 

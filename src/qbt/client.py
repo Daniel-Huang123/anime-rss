@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
+import feedparser
 import qbittorrentapi
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,7 @@ class QBTClient:
         save_path: str = "",
         must_contain: str = "",
         must_not_contain: str = "",
+        use_regex: bool = False,
         smart_filter: bool = True,
     ) -> tuple[bool, str]:
         """
@@ -95,6 +98,7 @@ class QBTClient:
         path 格式：'2026Q1/进击的巨人'
         save_path：种子保存目录；为空时 qBittorrent 使用默认路径。
         must_contain / must_not_contain：集数去重过滤（如 must_contain="CHS" 只下简体）。
+        use_regex：must_contain / must_not_contain 是否按正则表达式匹配。
         smart_filter：开启后 qBittorrent 自动跳过已下载集数，防同集重复下载。
         返回 (成功, 消息)。
         """
@@ -111,7 +115,7 @@ class QBTClient:
                     "enabled": True,
                     "mustContain": must_contain,
                     "mustNotContain": must_not_contain,
-                    "useRegex": False,
+                    "useRegex": use_regex,
                     "episodeFilter": "",
                     "smartFilter": smart_filter,
                     "addPaused": False,
@@ -127,6 +131,95 @@ class QBTClient:
         except Exception as e:
             logger.error("添加 RSS 失败 [%s]: %s", path, e)
             return False, f"添加失败：{e}"
+
+    @staticmethod
+    def _rss_title_matches(
+        title: str,
+        must_contain: str = "",
+        must_not_contain: str = "",
+        use_regex: bool = False,
+    ) -> bool:
+        if use_regex:
+            if must_contain:
+                try:
+                    if not re.search(must_contain, title, re.IGNORECASE):
+                        return False
+                except re.error:
+                    return False
+            if must_not_contain:
+                try:
+                    if re.search(must_not_contain, title, re.IGNORECASE):
+                        return False
+                except re.error:
+                    return False
+            return True
+
+        if must_contain and must_contain not in title:
+            return False
+        if must_not_contain and must_not_contain in title:
+            return False
+        return True
+
+    def backfill_from_rss(
+        self,
+        rss_url: str,
+        category: str,
+        save_path: str = "",
+        must_contain: str = "",
+        must_not_contain: str = "",
+        use_regex: bool = False,
+        max_items: int = 1,
+    ) -> tuple[int, str]:
+        """
+        Proactively add latest matching RSS entries.
+        Useful when qB RSS article read-state prevents auto-download triggers.
+        """
+        try:
+            feed = feedparser.parse(rss_url)
+            entries = list(feed.entries or [])
+        except Exception as e:
+            return 0, f"RSS parse failed: {e}"
+
+        urls: list[str] = []
+        for entry in entries:
+            title = str(entry.get("title", "") or "")
+            if not self._rss_title_matches(
+                title,
+                must_contain=must_contain,
+                must_not_contain=must_not_contain,
+                use_regex=use_regex,
+            ):
+                continue
+
+            torrent_url = (
+                str(entry.get("torrentURL", "") or "").strip()
+                or str(entry.get("link", "") or "").strip()
+            )
+            if not torrent_url:
+                torrent = entry.get("torrent")
+                if isinstance(torrent, dict):
+                    torrent_url = str(torrent.get("url", "") or "").strip()
+            if not torrent_url:
+                continue
+
+            urls.append(torrent_url)
+            if len(urls) >= max(1, int(max_items)):
+                break
+
+        if not urls:
+            return 0, "No matching RSS entry for backfill"
+
+        try:
+            with self._client() as c:
+                c.torrents_add(
+                    urls=urls,
+                    category=category,
+                    save_path=save_path or None,
+                    is_paused=False,
+                )
+            return len(urls), f"Backfilled {len(urls)} item(s)"
+        except Exception as e:
+            return 0, f"Backfill failed: {e}"
 
     def unsubscribe(
         self,
