@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from src.qbt.client import QBTClient
@@ -21,6 +22,8 @@ from src.utils.state import (
     get_subscriptions,
     remove_subscription,
 )
+
+logger = logging.getLogger(__name__)
 
 _PENDING_FILE = PENDING_CHECKS_FILE
 
@@ -166,12 +169,22 @@ def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, 
     qbt_cfg = cfg["qbittorrent"]
     qbt_save_path = qbt_cfg.get("save_path", "").strip().strip('"').strip("'")
 
+    # 索引未就绪（页面后台还没建完，刚启动/刚更新后常见）时，这里同步补建一次。
+    # 蜜柑 bgm_id→mikan_id 索引比实时 bgm.tv 搜索可靠得多（bgm 搜索对「上伊那牡丹…」
+    # 这类怪名经常搜不到 → 走 None 路径就订阅失败）。索引已缓存，命中即秒回。
+    if not search_override and not season_index:
+        try:
+            season_index = build_season_index(quarter, use_mirror=use_mirror)
+        except Exception as exc:  # noqa: BLE001 - 建索引失败仍退回按需解析
+            logger.warning("订阅时补建季度索引失败 [%s]：%s", quarter, exc)
+            season_index = None
+
     result = resolve_anime_rss(
         title,
         priorities,
         weeks,
         use_mirror,
-        # 索引未就绪（{}）时传 None，自动走 resolve 的按需解析兜底路径
+        # 仍为空时传 None，退回 resolve 的按需解析兜底路径
         season_index=None if search_override else (season_index or None),
         search_override=search_override,
         quarter=quarter,

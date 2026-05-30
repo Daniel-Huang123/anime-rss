@@ -158,10 +158,15 @@ class QBTClient:
         """
         try:
             with self._client() as c:
-                # 1. 先建/更新自动下载规则（规则名与 path 相同）——必须在 add_feed 之前！
-                #    qB 在 add_feed 后会立刻异步抓取 feed 文章并按「当时已存在的规则」处理，
-                #    若规则此时还没建好，已播出的存量集数会被标记为已处理而永不自动下载
-                #    （只有之后新到的文章才触发）。先建规则可让存量集数也参与匹配。
+                # 1. 添加 RSS feed
+                try:
+                    c.rss.add_feed(url=url, item_path=path)
+                except qbittorrentapi.Conflict409Error:
+                    pass   # feed 已存在，继续确保规则存在
+
+                # 2. 创建/更新自动下载规则（规则名与 path 相同）。
+                #    规则负责「订阅之后新到的集」自动下载；订阅时已存在的存量集由
+                #    subscribe 的 backfill_from_rss 直接补（qB 不会回溯已抓取的文章）。
                 rule_def: dict = {
                     "enabled": True,
                     "mustContain": must_contain,
@@ -176,12 +181,6 @@ class QBTClient:
                 if save_path:
                     rule_def["savePath"] = save_path
                 c.rss.set_rule(rule_name=path, rule_def=rule_def)
-
-                # 2. 再添加 RSS feed
-                try:
-                    c.rss.add_feed(url=url, item_path=path)
-                except qbittorrentapi.Conflict409Error:
-                    pass   # feed 已存在，规则已在上一步确保
 
             logger.info("RSS+规则 已添加：%s → %s  savePath=%s", path, url, save_path)
             return True, f"✓ 已添加 RSS：{path}"
