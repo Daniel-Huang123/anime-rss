@@ -22,6 +22,60 @@ import qbittorrentapi
 logger = logging.getLogger(__name__)
 
 
+_EP_PATTERNS = [
+    re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})"),            # S01E08
+    re.compile(r"\[(\d{1,4})(?:v\d)?\]"),                 # [08] / [08v2]（桜都等内嵌命名）
+    re.compile(r"(?<![0-9])[-–]\s*(\d{1,4}(?:\.\d)?)(?!\d)"),  # - 08
+    re.compile(r"第\s*(\d{1,4})\s*[话話集]"),             # 第08话
+    re.compile(r"\b[Ee][Pp]?\.?\s*(\d{1,4})\b"),          # EP08
+]
+
+
+def _episode_key(title: str) -> str | None:
+    """从标题里抽出集数标识，用于补拉时同集去重（如同集的简繁/简体两版只取一个）。
+
+    抽不出来时返回 None（调用方不去重、全部保留，避免误丢不同集）。
+    """
+    for i, pat in enumerate(_EP_PATTERNS):
+        m = pat.search(title)
+        if m:
+            if i == 0:  # SxxExx
+                return f"{int(m.group(1))}x{int(m.group(2))}"
+            try:
+                return str(float(m.group(1)))
+            except ValueError:
+                return m.group(1)
+    return None
+
+
+def _torrent_url_from_entry(entry) -> str:
+    """从 feedparser 条目里取真正的 .torrent 链接。
+
+    蜜柑 RSS 的 entry.link 是「剧集详情页」(/Home/Episode/...)，不是种子；真正的
+    .torrent 在 <enclosure>（feedparser → entry.enclosures / 带 bittorrent 类型的 links）。
+    旧实现误用 entry.link 把页面 URL 喂给 qB，torrents_add 解析失败 → 补拉不到任何集。
+    """
+    for enc in (entry.get("enclosures") or []):
+        if isinstance(enc, dict):
+            href = str(enc.get("href", "") or "").strip()
+            if href:
+                return href
+    for link in (entry.get("links") or []):
+        if isinstance(link, dict) and link.get("type") == "application/x-bittorrent":
+            href = str(link.get("href", "") or "").strip()
+            if href:
+                return href
+    # 兜底：少数源把种子直接放 link/torrentURL
+    for key in ("torrentURL", "link"):
+        val = str(entry.get(key, "") or "").strip()
+        if val.endswith(".torrent") or val.startswith("magnet:"):
+            return val
+    torrent = entry.get("torrent")
+    if isinstance(torrent, dict):
+        return str(torrent.get("url", "") or "").strip()
+    return ""
+
+
 def _is_same_or_child_path(path: str, parent: str) -> bool:
     """Case-insensitive path containment check with segment boundary."""
     if not path or not parent:
@@ -110,7 +164,9 @@ class QBTClient:
                 except qbittorrentapi.Conflict409Error:
                     pass   # feed 已存在，继续确保规则存在
 
-                # 2. 创建/更新自动下载规则（规则名与 path 相同）
+                # 2. 创建/更新自动下载规则（规则名与 path 相同）。
+                #    规则负责「订阅之后新到的集」自动下载；订阅时已存在的存量集由
+                #    subscribe 的 backfill_from_rss 直接补（qB 不会回溯已抓取的文章）。
                 rule_def: dict = {
                     "enabled": True,
                     "mustContain": must_contain,
@@ -168,11 +224,14 @@ class QBTClient:
         must_contain: str = "",
         must_not_contain: str = "",
         use_regex: bool = False,
-        max_items: int = 1,
+        max_items: int = 100,
     ) -> tuple[int, str]:
         """
-        Proactively add latest matching RSS entries.
-        Useful when qB RSS article read-state prevents auto-download triggers.
+        主动把 RSS 里匹配的存量集数直接加入 qB（qB 自动下载规则对「订阅前已存在的
+        文章」不会回溯触发，这里负责补齐存量；新到的集数仍由规则自动下载）。
+
+        默认 max_items=100：补齐当前 feed 里全部匹配集（蜜柑 RSS 一般只列当季，量可控），
+        去重交给 qB（同 infohash 不会重复添加）。
         """
         try:
             feed = feedparser.parse(rss_url)
@@ -181,6 +240,7 @@ class QBTClient:
             return 0, f"RSS parse failed: {e}"
 
         urls: list[str] = []
+        seen_eps: set[str] = set()
         for entry in entries:
             title = str(entry.get("title", "") or "")
             if not self._rss_title_matches(
@@ -191,14 +251,14 @@ class QBTClient:
             ):
                 continue
 
-            torrent_url = (
-                str(entry.get("torrentURL", "") or "").strip()
-                or str(entry.get("link", "") or "").strip()
-            )
-            if not torrent_url:
-                torrent = entry.get("torrent")
-                if isinstance(torrent, dict):
-                    torrent_url = str(torrent.get("url", "") or "").strip()
+            # 同集去重：(CHS|简) 可能同时命中「简繁内封」「简体内嵌」两版，每集只取首个。
+            ep = _episode_key(title)
+            if ep is not None:
+                if ep in seen_eps:
+                    continue
+                seen_eps.add(ep)
+
+            torrent_url = _torrent_url_from_entry(entry)
             if not torrent_url:
                 continue
 

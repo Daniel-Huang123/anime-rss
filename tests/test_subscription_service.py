@@ -1,6 +1,16 @@
 from __future__ import annotations
 
 
+def test_safe_component_replaces_windows_illegal_chars():
+    from gui.services.subscription_service import _safe_component
+
+    # 「Re:从零开始…」里的半角冒号会让 Windows 建不了目录 → 必须换掉
+    assert _safe_component("Re:从零开始的异世界生活 第4期") == "Re：从零开始的异世界生活 第4期"
+    assert ":" not in _safe_component("a:b")
+    assert _safe_component("正常番名 第2期") == "正常番名 第2期"  # 合法名不变
+    assert _safe_component("结尾点. ") == "结尾点"  # 去掉结尾的空格/点
+
+
 def test_unsubscribe_title_is_idempotent_when_state_record_missing(monkeypatch):
     import gui.services.subscription_service as svc
 
