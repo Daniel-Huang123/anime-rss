@@ -20,16 +20,38 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 安装 qBittorrent
 
-```bash
-uv sync
-uv run scrapling install   # 首次安装 Scrapling 浏览器驱动
-```
+追番姬会把 RSS 订阅规则写入本地 qBittorrent，所以需要先安装并开启 Web UI：
 
-### 2. 配置
+1. 下载安装 [qBittorrent](https://www.qbittorrent.org/download)。
+2. 启动 qBittorrent，进入 `工具 -> 选项 -> Web UI`。
+3. 勾选“启用 Web 用户界面（远程控制）”。
+4. 记下端口、用户名和密码，后面首次启动追番姬时会用到。
 
-复制 `config.example.yaml` 为 `config.yaml`，按需修改：
+### 2. 下载正式版 app
+
+前往 [Releases](https://github.com/Daniel-Huang123/anime-season-rss/releases) 下载最新版 Windows 压缩包。
+
+下载后解压压缩包：
+
+1. 右键下载好的压缩包。
+2. 选择“解压到当前文件夹”或“解压到 `zhuifanji/`”。
+3. 打开解压后的目录，双击 `zhuifanji.exe`。
+
+正式版 app 可直接运行，无需安装 Python，也无需使用 `uv`。
+
+### 3. 首次配置
+
+第一次启动会弹出 Onboarding 向导，按提示填写：
+
+- qBittorrent 的 Host、端口、用户名、密码
+- 下载路径，例如 `D:/Anime`
+- 字幕组优先级，例如 `ANi`、`kirara`
+
+填写后点击“测试连接”，确认成功后保存即可开始使用。
+
+如需手动配置，也可以参考 `config.example.yaml`：
 
 ```yaml
 qbittorrent:
@@ -50,15 +72,6 @@ advanced:
   use_mirror: false           # 网络受限时改为 true，使用 mikanime.tv 镜像
 ```
 
-### 3. 启动
-
-桌面 GUI（推荐）：
-
-```bash
-uv sync --group gui
-uv run python gui_main.py
-```
-
 ---
 
 ## 订阅流程详解
@@ -76,11 +89,16 @@ uv run python gui_main.py
 
 | 场景 | 策略 |
 |------|------|
-| 简体内嵌（CHS/CHS&CHT） | `mustContain=CHS`，只下简体版本 |
-| 多来源（CR + ABEMA 等） | 按优先级锁定单一来源（B-Global > Baha > Abema > CR > Bilibili），`smartFilter=false`，确保历史集数全部下载 |
-| 单来源 | `smartFilter=true`，防止同集重复 |
+| 简体标记（CHS / CHS&CHT / 简繁内封 / 简体内嵌 / 简日 / `[简]` 等） | `mustContain=(CHS\|简)`，`useRegex=true`，优先下载含简体的版本，放过纯繁体 |
+| 多来源（CR + ABEMA 等）且无简体标记 | 按优先级锁定单一来源：B-Global > Baha > Abema > CR > Bilibili，避免同集多源重复 |
+| 其他情况 | 不额外限制标题，交给 qBittorrent 的 `smartFilter=true` 做基础去重 |
 
-> **为何多来源时关闭 smartFilter**：qBittorrent 新建规则时，`smartFilter=true` 会将 RSS 现有条目全部标记为"已处理"，导致只下载规则创建后的新集数。单来源锁定后无需去重，关闭 smartFilter 可确保补全历史集数。
+订阅时会同时处理两类下载：
+
+1. **订阅后的新集**：写入 qBittorrent RSS Feed 和自动下载规则，后续更新由 qBittorrent 自动接管。
+2. **订阅前已存在的存量集**：追番姬会直接从 RSS 的 `.torrent` enclosure 补拉匹配条目（默认最多 100 条），避免 qBittorrent 新建规则不回溯历史文章导致漏下。
+
+补拉时还会按集数做一次同集去重：例如 `(CHS|简)` 同时命中“简繁内封”和“简体内嵌”时，每集只取第一个匹配项，避免重复下载同一集。
 
 ### 取消订阅
 
@@ -129,7 +147,9 @@ uv run python gui_main.py
 
 ---
 
-## 打包为 EXE（Windows）
+## 开发者：本地构建 EXE（Windows）
+
+普通用户请直接下载正式版 app；本节仅面向需要从源码构建的开发者。
 
 ### 1. 安装依赖
 
@@ -145,7 +165,7 @@ build_exe.bat
 
 输出目录：`dist/zhuifanji/zhuifanji.exe`
 
-### 3. 运行与数据目录说明
+### 3. 数据目录说明
 
 - 开发模式：配置和状态写入项目根目录
 - EXE 模式：配置和状态写入 **exe 同目录**
@@ -163,14 +183,7 @@ PyQt6 原生桌面版（`gui/`），已覆盖以下页面：
 - `Media Library`：封面网格/列表、继续观看、点击封面查看剧集详情并播放
 - `Settings`：qBittorrent、字幕优先级、清理与高级参数、自动刷新、连接测试
 
-### 启动方式
-
-```bash
-uv sync --group gui
-uv run python gui_main.py
-```
-
-> 已切换为 PyQt6 打包链路（`zhuifanji.spec` + `gui_main.py`），发布版可双击运行，无需安装 Python / uv。
+发布版 app 已切换为 PyQt6 打包链路（`zhuifanji.spec` + `gui_main.py`），可双击 `zhuifanji.exe` 运行，无需安装 Python / uv。
 
 ---
 
@@ -184,12 +197,12 @@ uv run python gui_main.py
 
 ---
 
-## 中文新手教程（Wiki 草稿）
+## 中文新手教程
 
-为 Phase 0 提供的中文小白教程草稿见：
+中文新手教程见：
 - `docs/wiki/新手教程.md`
 
-可直接复制到 GitHub Wiki 并补充截图标注。下面是 qBittorrent 配置关键截图：
+可直接同步到 GitHub Wiki。下面是 qBittorrent 配置关键截图：
 
 ### 1. 从主界面进入 WebUI 设置
 
@@ -201,16 +214,8 @@ uv run python gui_main.py
 
 ---
 
-## 运行测试
+## 开发者：运行测试
 
 ```bash
 uv run pytest tests/ -v
 ```
-
----
-
-## 已知限制
-
-- 元祖小邦多利等少数番剧不在蜜柑计划当季索引中，需手动搜索
-- 部分标题差异较大（如「工坊」vs「工房」）的番剧可能需要手动输入搜索词重试
-- 媒体库播放追踪依赖 PotPlayer 播放历史，其他播放器暂不支持
