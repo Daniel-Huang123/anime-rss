@@ -14,7 +14,12 @@ from src.scrapers.yuc_wiki import get_season_list
 from src.utils.cover_cache import get_or_fetch_cover
 from src.utils.runtime_paths import PENDING_CHECKS_FILE
 from src.utils.season import quarter_to_ym
-from src.utils.state import add_subscription, get_subscriptions, remove_subscription
+from src.utils.state import (
+    add_subscription,
+    get_all_subscriptions_flat,
+    get_subscriptions,
+    remove_subscription,
+)
 
 _PENDING_FILE = PENDING_CHECKS_FILE
 
@@ -172,10 +177,24 @@ def subscribe_title(cfg: dict, quarter: str, title: str, cover_url: str | None, 
         url=result["rss_url"],
         path=f"{quarter}/{title}",
         save_path=dl_path,
-        **rss_filter,
+        must_contain=rss_filter.get("must_contain", ""),
+        must_not_contain=rss_filter.get("must_not_contain", ""),
+        use_regex=bool(rss_filter.get("use_regex", False)),
+        smart_filter=bool(rss_filter.get("smart_filter", True)),
     )
     if not ok:
         return False, msg
+
+    # RSS 规则有时会受 qB “已读文章”状态影响而不立即触发，这里主动补拉最新匹配条目兜底。
+    qbt.backfill_from_rss(
+        rss_url=result["rss_url"],
+        category=f"{quarter}/{title}",
+        save_path=dl_path,
+        must_contain=rss_filter.get("must_contain", ""),
+        must_not_contain=rss_filter.get("must_not_contain", ""),
+        use_regex=bool(rss_filter.get("use_regex", False)),
+        max_items=1,
+    )
 
     get_or_fetch_cover(title, result["bangumi_id"], cover_url or None)
     add_subscription(
@@ -223,5 +242,54 @@ def unsubscribe_title(cfg: dict, quarter: str, title: str, delete_qbt: bool = Tr
     removed = remove_subscription(quarter, title)
     if removed:
         return True, f"已取消订阅：{quarter}/{title}"
+    # 幂等：如果记录已不存在，视作已取消成功，避免跨页状态短暂不一致时报错
+    remaining = get_subscriptions(quarter).get(quarter, [])
+    exists = any(str(item.get("title", "")).strip() == title for item in remaining)
+    if not exists:
+        return True, f"已取消订阅：{quarter}/{title}"
     return False, f"未找到订阅记录：{quarter}/{title}"
 
+
+
+def realign_qbt_rules(cfg: dict) -> tuple[int, int, list[str]]:
+    """按当前本地订阅，重新检测去重过滤并覆盖更新已存在的 qBittorrent 规则。
+
+    对每条带 rss_url 的订阅：重跑 detect_rss_filter（识别 CHS/简 内嵌，否则回退
+    smart_filter 去重），再用 add_rss_feed 以同名规则覆盖（qB setRule 同名即更新），
+    把字幕语言筛选/去重策略对齐到最新逻辑。字幕组优先级沿用用户配置。
+
+    返回 (更新成功数, 处理总数, 失败信息列表)。
+    """
+    qbt_cfg = cfg["qbittorrent"]
+    qbt_save_path = qbt_cfg.get("save_path", "").strip().strip('"').strip("'")
+    qbt = QBTClient(
+        host=qbt_cfg["host"],
+        port=qbt_cfg["port"],
+        username=qbt_cfg["username"],
+        password=qbt_cfg["password"],
+    )
+
+    targets = [s for s in get_all_subscriptions_flat() if str(s.get("rss_url", "")).strip()]
+    ok = 0
+    errors: list[str] = []
+    for sub in targets:
+        quarter = str(sub.get("quarter", "")).strip()
+        title = str(sub.get("title", "")).strip()
+        rss_url = str(sub.get("rss_url", "")).strip()
+        feed_path = str(sub.get("qbt_feed_path") or f"{quarter}/{title}").strip()
+        dl_path = f"{qbt_save_path}/{quarter}/{title}" if qbt_save_path else ""
+        try:
+            rule_filter = detect_rss_filter(rss_url)
+            success, msg = qbt.add_rss_feed(
+                url=rss_url,
+                path=feed_path,
+                save_path=dl_path,
+                **rule_filter,
+            )
+            if success:
+                ok += 1
+            else:
+                errors.append(f"{feed_path}: {msg}")
+        except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余对齐
+            errors.append(f"{feed_path}: {exc}")
+    return ok, len(targets), errors
